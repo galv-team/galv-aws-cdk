@@ -1,0 +1,21 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "name": "galv",
+    "mailFromDomain": "mail.example.com",
+    "projectNameTag": "galv",
+    "backendVersion": "latest",
+    "isProduction": true,
+    "frontendEnvironment": {},
+    "backendEnvironment": {
+      "DJANGO_SUPERUSER_USERNAME": "admin",
+      "DJANGO_LOG_LEVEL": "INFO",
+      "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "",
+      "DJANGO_USER_ACTIVATION_TOKEN_EXPIRY_S": ""
+    },
+    "frontendSecretsName": "galv-frontend-secrets",
+    "frontendSecretsKeys": [],
+    "backendSecretsName": "galv-backend-secrets",
+    "backendSecretsKeys": []
+  }
+}
