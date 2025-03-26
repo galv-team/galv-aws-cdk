@@ -3,6 +3,7 @@
   "context": {
     "name": "galv",
     "mailFromDomain": "mail.example.com",
+    "mailFromUser": "galv-no-reply",
     "projectNameTag": "galv",
     "backendVersion": "latest",
     "isProduction": true,
@@ -16,6 +17,7 @@
     "frontendSecretsName": "galv-frontend-secrets",
     "frontendSecretsKeys": [],
     "backendSecretsName": "galv-backend-secrets",
-    "backendSecretsKeys": []
+    "backendSecretsKeys": [],
+    "monitorIntervalMinutes": 5
   }
 }

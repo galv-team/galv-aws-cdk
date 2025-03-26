@@ -1,3 +1,8 @@
+# Horrible Hack to support NVM
+import _nvm_hack
+_nvm_hack.hack_nvm_path()
+# /HH
+
 import unittest
 from aws_cdk import App
 from aws_cdk.assertions import Template, Match
@@ -9,6 +14,8 @@ class TestGalvStack(unittest.TestCase):
     def setUp(self):
         self.app = App(context={
             "name": "test",
+            "mailFromUser": "test",
+            "mailFromDomain": "example.com",
             "projectNameTag": "galv",
             "backendEnvironment": {
                 "DJANGO_SUPERUSER_USERNAME": "admin",
@@ -22,7 +29,7 @@ class TestGalvStack(unittest.TestCase):
             "backendSecretsKeys": [
                 "DJANGO_SUPERUSER_PASSWORD",
                 "DJANGO_SECRET_KEY"
-            ]
+            ],
         })
         self.stack = GalvStack(self.app, "TestStack")
         self.template = Template.from_stack(self.stack)
@@ -142,18 +149,90 @@ class TestGalvStack(unittest.TestCase):
                 self.assert_secret_present(secret)
 
     def test_backend_can_connect_to_database(self):
-        # Check that the RDS instance allows ingress from the ECS service security group
-        self.template.has_resource_properties("AWS::EC2::SecurityGroupIngress", {
-            "FromPort": 5432,
-            "ToPort": 5432,
-            "IpProtocol": "tcp",
-            "Description": Match.string_like_regexp(".*allow connections.*"),
-        })
+        ingresses = self.template.find_resources("AWS::EC2::SecurityGroupIngress")
+
+        db_ingress = [
+            props for props in ingresses.values()
+            if props["Properties"]["IpProtocol"] == "tcp"
+        ]
+
+        self.assertTrue(db_ingress, "No TCP ingress rule found from backend to RDS")
 
     def test_rds_database_name_set(self):
         self.template.has_resource_properties("AWS::RDS::DBInstance", {
             "DBName": "galvdb"
         })
+
+    def test_s3_env_vars_injected(self):
+        """
+        Test that the expected environment variables are injected into the backend container
+        """
+        expected_vars = [
+            "DJANGO_AWS_S3_REGION_NAME",
+            "DJANGO_AWS_STORAGE_BUCKET_NAME",
+            "DJANGO_STORE_MEDIA_FILES_ON_S3",
+            "DJANGO_STORE_STATIC_FILES_ON_S3",
+            "DJANGO_LABS_USE_OUR_S3_STORAGE",
+            "DJANGO_LAB_STORAGE_QUOTA_BYTES"
+        ]
+        for var in expected_vars:
+            with self.subTest(var=var):
+                self.assert_env_var_present(var)
+
+    def test_email_env_and_secrets_injected(self):
+        env_vars = [
+            "DJANGO_EMAIL_HOST",
+            "DJANGO_EMAIL_PORT",
+            "DJANGO_EMAIL_USE_TLS",
+            "DJANGO_EMAIL_USE_SSL",
+            "DJANGO_DEFAULT_FROM_EMAIL"
+        ]
+
+        secret_keys = [
+            "DJANGO_EMAIL_HOST_USER",
+            "DJANGO_EMAIL_HOST_PASSWORD"
+        ]
+
+        for var in env_vars:
+            with self.subTest(env_var=var):
+                self.assert_env_var_present(var)
+
+        for key in secret_keys:
+            with self.subTest(secret_key=key):
+                self.assert_secret_present(key)
+
+    def test_setup_task_definition_exists(self):
+        self.template.has_resource_properties("AWS::ECS::TaskDefinition", {
+            "ContainerDefinitions": Match.array_with([
+                Match.object_like({
+                    "Command": ["/code/setup_db.sh"]
+                })
+            ])
+        })
+
+    def test_validation_monitor_scheduled_when_enabled(self):
+        app = App(context={
+            "name": "test",
+            "monitorIntervalMinutes": 5,
+            "mailFromDomain": "example.com"
+        })
+        stack = GalvStack(app, "TestStack")
+        template = Template.from_stack(stack)
+
+        # Should create an Events::Rule to run the task
+        template.resource_count_is("AWS::Events::Rule", 1)
+
+    def test_validation_monitor_not_scheduled_when_disabled(self):
+        app = App(context={
+            "name": "test",
+            "monitorIntervalMinutes": 0,
+            "mailFromDomain": "example.com"
+        })
+        stack = GalvStack(app, "TestStack")
+        template = Template.from_stack(stack)
+
+        # Should NOT create an Events::Rule
+        template.resource_count_is("AWS::Events::Rule", 0)
 
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ with open("README.md") as fp:
     long_description = fp.read()
 
 setuptools.setup(
-    name="galv_aws_cdk",
+    name="galv_cdk",
     version="0.1.0",
     description="Deploy Galv to AWS with CDK",
     long_description=long_description,
