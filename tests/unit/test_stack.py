@@ -234,6 +234,30 @@ class TestGalvStack(unittest.TestCase):
         # Should NOT create an Events::Rule
         template.resource_count_is("AWS::Events::Rule", 0)
 
+    def test_backend_health_check_configured(self):
+        self.template.has_resource_properties("AWS::ElasticLoadBalancingV2::TargetGroup", {
+            "HealthCheckPath": "/health/",
+            "HealthCheckIntervalSeconds": 30,
+            "HealthCheckTimeoutSeconds": 10,
+            "HealthyThresholdCount": 2,
+            "UnhealthyThresholdCount": 2
+        })
+
+    def test_check_status_task_definition_exists(self):
+        self.template.has_resource_properties("AWS::ECS::TaskDefinition", {
+            "ContainerDefinitions": Match.array_with([
+                Match.object_like({
+                    "Command": ["python", "manage.py", "check_status"],
+                    "LogConfiguration": Match.object_like({
+                        "LogDriver": "awslogs"
+                    })
+                })
+            ])
+        })
+
+    def test_check_status_task_output_exists(self):
+        self.template.has_output("CheckStatusTaskDefinitionArn", Match.any_value())
+
 
 if __name__ == '__main__':
     unittest.main()

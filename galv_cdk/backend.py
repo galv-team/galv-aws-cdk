@@ -45,6 +45,7 @@ class GalvBackend(Construct):
         self._create_service()
         self._create_setup_task()
         self._create_validation_monitor_task()
+        self._create_check_status_task()
 
     def _create_storage(self):
         """
@@ -189,6 +190,16 @@ class GalvBackend(Construct):
             security_groups=[self.service_sg]
         )
 
+        self.service.target_group.configure_health_check(
+            path="/health/",
+            port="traffic-port",  # or "8000" explicitly
+            healthy_http_codes="200",
+            interval=Duration.seconds(30),
+            timeout=Duration.seconds(10),
+            healthy_threshold_count=2,
+            unhealthy_threshold_count=2,
+        )
+
         self.bucket.grant_read_write(self.service.task_definition.task_role)
         self.db_instance.connections.allow_default_port_from(self.service.service)
 
@@ -296,3 +307,56 @@ class GalvBackend(Construct):
             )
 
         CfnOutput(self, "ValidationMonitorTaskDefArn", value=self.monitor_task_def.task_definition_arn)
+
+    def _create_check_status_task(self):
+        """
+        Create a task that checks the status of the backend service.
+        Can be run automatically or manually to verify the service is running.
+        """
+        self.check_sg = ec2.SecurityGroup(self, f"{self.name}-CheckStatusSG", vpc=self.vpc)
+
+        self.check_status_task_def = ecs.FargateTaskDefinition(
+            self,
+            f"{self.name}-CheckStatusTaskDef",
+            cpu=256,
+            memory_limit_mib=512
+        )
+
+        self.check_status_task_def.add_container(
+            f"{self.name}-CheckStatusContainer",
+            image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
+            command=["python", "manage.py", "check_status"],
+            logging=ecs.LogDrivers.aws_logs(stream_prefix="check-status"),
+            environment=self.env_vars,
+            secrets=self.secrets
+        )
+
+        self.bucket.grant_read_write(self.check_status_task_def.task_role)
+        self.db_instance.connections.allow_default_port_from(self.check_sg)
+
+        CfnOutput(self, "CheckStatusTaskDefinitionArn", value=self.check_status_task_def.task_definition_arn)
+
+        AwsCustomResource(
+            self,
+            f"{self.name}-RunCheckStatusTask",
+            on_create=AwsSdkCall(
+                service="ECS",
+                action="runTask",
+                parameters={
+                    "cluster": self.cluster.cluster_name,
+                    "launchType": "FARGATE",
+                    "taskDefinition": self.check_status_task_def.task_definition_arn,
+                    "networkConfiguration": {
+                        "awsvpcConfiguration": {
+                            "subnets": [subnet.subnet_id for subnet in self.vpc.private_subnets],
+                            "assignPublicIp": "DISABLED",
+                            "securityGroups": [self.check_sg.security_group_id]
+                        }
+                    }
+                },
+                physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunCheckStatusTask")
+            ),
+            policy=AwsCustomResourcePolicy.from_sdk_calls(
+                resources=AwsCustomResourcePolicy.ANY_RESOURCE
+            )
+        ).node.add_dependency(self.check_status_task_def)
