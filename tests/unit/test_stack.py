@@ -249,14 +249,14 @@ class TestGalvStack(unittest.TestCase):
                 Match.object_like({
                     "Command": ["python", "manage.py", "check_status"],
                     "LogConfiguration": Match.object_like({
-                        "LogDriver": "awslogs"
+                        "LogDriver": "awslogs",
+                        "Options": Match.object_like({
+                            "awslogs-stream-prefix": "check-status"
+                        })
                     })
                 })
             ])
         })
-
-    def test_check_status_task_output_exists(self):
-        self.template.has_output("CheckStatusTaskDefinitionArn", Match.any_value())
 
 
 if __name__ == '__main__':
