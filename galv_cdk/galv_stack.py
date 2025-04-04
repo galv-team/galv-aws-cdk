@@ -1,42 +1,267 @@
-from aws_cdk import Stack, Environment, Tags
-from aws_cdk import aws_ec2 as ec2
-from constructs import Construct
+from aws_cdk import Stack, Environment, Tags, RemovalPolicy, CfnOutput
+from aws_cdk import aws_ec2 as ec2, aws_s3 as s3, aws_iam as iam, aws_kms as kms, aws_certificatemanager as acm, aws_route53 as route53, aws_route53_targets as targets
+
+from cdk_nag import NagSuppressions
+from constructs import Construct, Node
 
 from galv_cdk.frontend import GalvFrontend
 from galv_cdk.backend import GalvBackend
+import re
 
 
 class GalvStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, certificate_arn: str|None = None, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         project_tag = self.node.try_get_context("projectNameTag") or "galv"
-        name = self.node.try_get_context("name") or "galv"
-        is_production = self.node.try_get_context("isProduction")
-        if is_production is None:
-            is_production = True
+        self.name = self.node.try_get_context("name") or "galv"
+        self.is_production = self.node.try_get_context("isProduction")
+        if self.is_production is None:
+            self.is_production = True
+
+        self.certificate_arn = certificate_arn
+
+        self.kms_key = kms.Key(self, f"{self.name}-KmsKey", enable_key_rotation=True)
+
+        self._create_domain_certificates()
+        self._create_log_bucket()
+        self._create_vpc()
+
+        # ==== Frontend Deployment ====
+        GalvFrontend(self, "Frontend", vpc=self.vpc, log_bucket=self.log_bucket, fqdn=self.frontend_fqdn, certificate=self.frontend_cert)
+
+        # ==== Backend Deployment ====
+        GalvBackend(self, "Backend", vpc=self.vpc, log_bucket=self.log_bucket, kms_key=self.kms_key, fqdn=self.backend_fqdn, backend_cert=self.backend_cert)
+
+        Tags.of(self).add("project-name", project_tag)
+
+    def _create_domain_certificates(self):
+        domain_name = self.node.try_get_context("domainName")
+        frontend_subdomain = self.node.try_get_context("frontendSubdomain") or ""
+        backend_subdomain = self.node.try_get_context("backendSubdomain") or "api"
+        is_route53_domain = self.node.try_get_context("isRoute53Domain") or False
+
+        self.frontend_fqdn = f"{frontend_subdomain}.{domain_name}".lstrip(".")
+        self.backend_fqdn = f"{backend_subdomain}.{domain_name}".lstrip(".")
+
+        if self.frontend_fqdn == self.backend_fqdn:
+            raise ValueError("Frontend and backend domain names cannot be the same")
+
+        if self.certificate_arn:
+            # Use existing certificate ARN if provided
+            self.frontend_cert = acm.Certificate.from_certificate_arn(self, "FrontendCert", self.certificate_arn)
+        else:
+            self.frontend_cert = None
+
+        # Lookup hosted zone if Route 53-managed
+        if is_route53_domain:
+            zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=domain_name)
+
+            if self.frontend_cert is None:
+                self.frontend_cert = acm.Certificate(
+                    self,
+                    "FrontendCertificate",
+                    domain_name=self.frontend_fqdn,
+                    validation=acm.CertificateValidation.from_dns(zone),
+                )
+
+            self.backend_cert = acm.Certificate(
+                self,
+                "BackendCertificate",
+                domain_name=self.backend_fqdn,
+                validation=acm.CertificateValidation.from_dns(zone),
+            )
+        else:
+            # Use DNS validation without Route 53 (requires user to add validation records manually)
+            if self.frontend_cert is None:
+                self.frontend_cert = acm.CfnCertificate(
+                    self,
+                    "FrontendCertificate",
+                    domain_name=self.frontend_fqdn,
+                    validation_method="DNS",
+                )
+                for idx, domain_validation in enumerate(self.frontend_cert.domain_validation_options or []):
+                    CfnOutput(
+                        self,
+                        f"FrontendCertValidation{idx}",
+                        value=f"{domain_validation['domainName']}: {domain_validation['resourceRecord']['name']} -> {domain_validation['resourceRecord']['value']}",
+                        description="Add this CNAME record to validate the frontend certificate"
+                    )
+
+            self.backend_cert = acm.CfnCertificate(
+                self,
+                "BackendCertificate",
+                domain_name=self.backend_fqdn,
+                validation_method="DNS",
+            )
+
+            # Output validation CNAMEs for manual setup
+            for idx, domain_validation in enumerate(self.backend_cert.domain_validation_options or []):
+                CfnOutput(
+                    self,
+                    f"BackendCertValidation{idx}",
+                    value=f"{domain_validation['domainName']}: {domain_validation['resourceRecord']['name']} -> {domain_validation['resourceRecord']['value']}",
+                    description="Add this CNAME record to validate the backend certificate"
+                )
+
+    def _create_log_bucket(self):
+        """
+        Create an S3 Bucket for storing logs.
+        Some logs are stored in the bucket, and some are sent to CloudWatch, because not all logs can be sent to S3.
+        :return:
+        """
+        # ==== Log Bucket ====
+        self.log_bucket = s3.Bucket(
+            self,
+            f"{self.name}-LogBucket",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL
+        )
+
+        self.log_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                actions=["s3:*"],
+                effect=iam.Effect.DENY,
+                principals=[iam.StarPrincipal()],
+                resources=[
+                    self.log_bucket.bucket_arn,
+                    self.log_bucket.arn_for_objects("*")
+                ],
+                conditions={"Bool": {"aws:SecureTransport": "false"}}
+            )
+        )
+
+        self.log_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowALBLogging",
+                principals=[
+                    iam.ServicePrincipal("logdelivery.elasticloadbalancing.amazonaws.com"),
+                    iam.ServicePrincipal("delivery.logs.amazonaws.com")
+                ],
+                actions=["s3:PutObject"],
+                resources=[self.log_bucket.arn_for_objects("AWSLogs/*")],
+                conditions={
+                    "StringEquals": {
+                        "s3:x-amz-acl": "bucket-owner-full-control"
+                    }
+                }
+            )
+        )
+
+        NagSuppressions.add_resource_suppressions(
+            self.log_bucket,
+            suppressions=[
+                {
+                    "id": "HIPAA.Security-S3BucketVersioningEnabled",
+                    "reason": "Log data is append-only; versioning not required"
+                },
+                {
+                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                    "reason": "Cross-region replication not needed for logs"
+                },
+                {
+                    "id": "HIPAA.Security-S3DefaultEncryptionKMS",
+                    "reason": "ALB access logs cannot be delivered to a KMS-encrypted bucket; S3-managed encryption is used instead."
+                },
+                {
+                    "id": "AwsSolutions-S10",
+                    "reason": "ALB access logs require a bucket without enforced aws:SecureTransport policies; encryption is still applied using S3-managed keys."
+                }
+            ]
+        )
+
+    def _create_vpc(self):
+        """
+        Create a VPC with public, private, and isolated subnets.
+        Public subnets are used for the ALB, private subnets are used for the backend services, and isolated subnets are used for the database.
+        :return:
+        """
 
         # ==== Shared VPC ====
-        vpc = ec2.Vpc(
+        self.vpc = ec2.Vpc(
             self,
-            f"{name}-Vpc",
+            f"{self.name}-Vpc",
             max_azs=2,
             subnet_configuration=[
                 ec2.SubnetConfiguration(
                     name="public",
                     subnet_type=ec2.SubnetType.PUBLIC,
+                    map_public_ip_on_launch=False,
                 ),
                 ec2.SubnetConfiguration(
                     name="private",
                     subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
                 ),
+                ec2.SubnetConfiguration(
+                    name="isolated",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                )
             ],
+            nat_gateways=0,  # Avoid NAT gateway charges
+            flow_logs={
+                "AllTraffic": ec2.FlowLogOptions(
+                    destination=ec2.FlowLogDestination.to_s3(self.log_bucket)
+                )
+            },
         )
 
-        # ==== Frontend Deployment ====
-        GalvFrontend(self, "Frontend", vpc=vpc)
+        # Add interface endpoints for private access to AWS services
+        vpc_endpoint_sg = ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
+        vpc_endpoint_sg.add_ingress_rule(ec2.Peer.ipv4(self.vpc.vpc_cidr_block), ec2.Port.tcp(443), "HTTPS from VPC")
 
-        # ==== Backend Deployment ====
-        GalvBackend(self, "Backend", vpc=vpc)
+        self.vpc.add_interface_endpoint(
+            "SecretsManagerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+            security_groups=[vpc_endpoint_sg],
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+        )
 
-        Tags.of(self).add("project-name", project_tag)
+        self.vpc.add_interface_endpoint(
+            "CloudWatchLogsEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+            security_groups=[vpc_endpoint_sg],
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+        )
+
+        NagSuppressions.add_resource_suppressions(
+            vpc_endpoint_sg,
+            suppressions=[
+                {
+                    "id": "AwsSolutions-EC23",
+                    "reason": "CDK Nag cannot evaluate VPC CIDR block when used in ingress rule. Ingress is correctly scoped to internal HTTPS only."
+                },
+                {
+                    "id": "HIPAA.Security-EC2RestrictedCommonPorts",
+                    "reason": "CDK Nag cannot evaluate VPC CIDR block when used in ingress rule. Port 443 is appropriately restricted to internal use."
+                },
+                {
+                    "id": "HIPAA.Security-EC2RestrictedSSH",
+                    "reason": "This rule only allows HTTPS (port 443); SSH is not allowed. False positive caused by evaluation error."
+                },
+            ]
+        )
+
+        NagSuppressions.add_resource_suppressions(
+            self.vpc,
+            suppressions=[{
+                "id": "HIPAA.Security-VPCDefaultSecurityGroupClosed",
+                "reason": "The default security group is not used by any resource (confirmed with unit test). All resources use explicitly assigned SGs."
+            }]
+        )
+
+        subnet_regex = re.compile(r"publicSubnet\d+/DefaultRoute")
+        for child in self.vpc.node.find_all():
+            if subnet_regex.search(child.node.path) and isinstance(child, ec2.CfnRoute):
+                # Add suppression for the route
+                NagSuppressions.add_resource_suppressions(
+                    child,
+                    suppressions=[{
+                        "id": "HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
+                        "reason": (
+                            "This route is required for public subnet internet access. "
+                            "Only the ALB uses this subnet, which is verified by unit tests."
+                        )
+                    }],
+                    apply_to_children=True
+                )

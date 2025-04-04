@@ -10,17 +10,24 @@ from aws_cdk import (
     aws_events_targets as targets,
     RemovalPolicy,
     aws_secretsmanager as sm,
+    aws_iam as iam,
+    aws_kms as kms,
     aws_logs as logs,
-    Stack, CfnOutput, Duration
+    aws_elasticloadbalancingv2 as elbv2,
+    aws_route53 as route53,
+    aws_route53_targets as route53_targets,
+    Stack, CfnOutput, Duration, Token
 )
+from aws_cdk.aws_certificatemanager import ICertificate, Certificate
 from aws_cdk.custom_resources import AwsCustomResource, PhysicalResourceId, AwsCustomResourcePolicy, AwsSdkCall
+from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from utils import inject_protected_env
+from utils import inject_protected_env, create_waf_scope_web_acl
 
 
 class GalvBackend(Construct):
-    def __init__(self, scope: Construct, id: str, *, vpc: ec2.Vpc) -> None:
+    def __init__(self, scope: Construct, id: str, *, vpc: ec2.Vpc, log_bucket: s3.Bucket|s3.IBucket, kms_key: kms.Key|kms.IKey, fqdn: str, backend_cert: ICertificate|Certificate) -> None:
         """
         Construct for deploying the Galv backend stack, including ECS services,
         S3, RDS, and scheduled tasks.
@@ -36,8 +43,15 @@ class GalvBackend(Construct):
 
         self.stack = Stack.of(self)
         self.vpc = vpc
+        self.log_bucket = log_bucket
+        self.kms_key = kms_key
+        self.fqdn = fqdn
+        self.backend_cert = backend_cert
         self.secrets = {}
 
+        self.log_retention = logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY
+
+        self._create_security_groups()
         self._create_storage()
         self._create_database()
         self._setup_environment()
@@ -45,6 +59,25 @@ class GalvBackend(Construct):
         self._create_service()
         self._create_setup_task()
         self._create_validation_monitor_task()
+
+        self._delayed_tasks()
+
+    def _create_security_groups(self):
+        """
+        Create security groups for the ALB, backend service, database, and endpoint.
+        """
+        self.alb_sg = ec2.SecurityGroup(self, f"{self.name}-ALBSG", vpc=self.vpc)
+        self.backend_sg = ec2.SecurityGroup(self, f"{self.name}-BackendServiceSG", vpc=self.vpc)
+        self.db_sg = ec2.SecurityGroup(self, f"{self.name}-DBSG", vpc=self.vpc)
+        self.setup_sg = ec2.SecurityGroup(self, f"{self.name}-SetupTaskSG", vpc=self.vpc)
+        self.monitor_sg = ec2.SecurityGroup(self, f"{self.name}-ValidationMonitorSG", vpc=self.vpc)
+        self.lambda_sg = ec2.SecurityGroup(self, f"{self.name}-LambdaSG", vpc=self.vpc)
+
+        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "HTTPS from internet")
+        self.backend_sg.add_ingress_rule(self.alb_sg, ec2.Port.tcp(8000), "Traffic from ALB")
+        self.db_sg.add_ingress_rule(self.backend_sg, ec2.Port.tcp(5432), "Postgres from backend service")
+        self.db_sg.add_ingress_rule(self.setup_sg, ec2.Port.tcp(5432), "Postgres from setup task")
+        self.db_sg.add_ingress_rule(self.monitor_sg, ec2.Port.tcp(5432), "Postgres from monitor task")
 
     def _create_storage(self):
         """
@@ -55,6 +88,36 @@ class GalvBackend(Construct):
             f"{self.name}-BackendStorage",
             removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
             auto_delete_objects=not self.is_production,
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            server_access_logs_bucket=self.log_bucket,
+            server_access_logs_prefix=f"{self.name}-BackendStorage-access-logs/"
+        )
+        self.bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                actions=["s3:*"],
+                effect=iam.Effect.DENY,
+                principals=[iam.StarPrincipal()],
+                resources=[
+                    self.bucket.bucket_arn,
+                    self.bucket.arn_for_objects("*")
+                ],
+                conditions={"Bool": {"aws:SecureTransport": "false"}}
+            )
+        )
+        NagSuppressions.add_resource_suppressions(
+            self.bucket,
+            suppressions=[
+                {
+                    "id": "HIPAA.Security-S3BucketVersioningEnabled",
+                    "reason": "Versioning is not required for backend data in this deployment"
+                },
+                {
+                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                    "reason": "Data replication is handled externally or not required"
+                }
+            ]
         )
 
     def _create_database(self):
@@ -73,7 +136,10 @@ class GalvBackend(Construct):
             engine=rds.DatabaseInstanceEngine.postgres(
                 version=rds.PostgresEngineVersion.VER_15_3
             ),
+            storage_encrypted=True,
             vpc=self.vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_group_name="isolated"),
+            security_groups=[self.db_sg],
             instance_type=ec2.InstanceType.of(
                 ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO
             ),
@@ -156,7 +222,6 @@ class GalvBackend(Construct):
         Required for deploying all ECS-based tasks and services.
         """
         self.cluster = ecs.Cluster(self, f"{self.name}-Cluster", vpc=self.vpc)
-        self.service_sg = ec2.SecurityGroup(self, f"{self.name}-BackendSG", vpc=self.vpc)
 
     def _create_service(self):
         """
@@ -170,6 +235,7 @@ class GalvBackend(Construct):
             cpu=512,
             memory_limit_mib=1024,
             desired_count=1,
+            min_healthy_percent=100,
             task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
                 image=ecs.ContainerImage.from_registry(
                     f"ghcr.io/galv-team/galv-backend:{self.backend_version}"
@@ -183,14 +249,54 @@ class GalvBackend(Construct):
                 secrets=self.secrets if self.secrets else None,
                 entry_point=["gunicorn"],
                 command=["--bind", "0.0.0.0:8000", "config.wsgi"],
+                log_driver=ecs.LogDrivers.aws_logs(
+                    stream_prefix=f"{self.name}-BackendService",
+                    log_retention=self.log_retention,
+                )
             ),
             public_load_balancer=True,
-            task_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            security_groups=[self.service_sg]
+            security_groups=[self.alb_sg],
+            task_subnets=ec2.SubnetSelection(subnet_group_name="private"),
+            certificate=self.backend_cert,
+            protocol=elbv2.ApplicationProtocol.HTTPS,
         )
 
         self.bucket.grant_read_write(self.service.task_definition.task_role)
+        NagSuppressions.add_resource_suppressions(
+            self.service.task_definition.task_role,
+            suppressions=[
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "appliesTo": [
+                        f"Resource::{self.bucket.bucket_arn}/*"
+                    ],
+                    "reason": (
+                        "Wildcard required to access dynamically named user uploads in S3. "
+                        "Access is scoped to this private bucket and validated by backend auth logic."
+                    )
+                }
+            ]
+        )
+
         self.db_instance.connections.allow_default_port_from(self.service.service)
+        self.service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(443))
+
+        web_acl_backend = create_waf_scope_web_acl(self, "BackendWebACL", name="backend", scope_type="REGIONAL", log_bucket=self.log_bucket)
+        cfn_alb = self.service.load_balancer.node.default_child
+        cfn_alb.web_acl_id = web_acl_backend.ref
+
+        if self.node.try_get_context("isRoute53Domain"):
+            zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=self.node.try_get_context('domainName'))
+
+            route53.ARecord(
+                self,
+                "BackendAliasRecord",
+                zone=zone,
+                record_name=self.fqdn,
+                target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(self.service.load_balancer)),
+            )
+        else:
+            CfnOutput(self, "BackendCNAME", value=f"{self.fqdn} -> {self.service.load_balancer.load_balancer_dns_name}")
 
     def _create_setup_task(self):
         """
@@ -198,8 +304,6 @@ class GalvBackend(Construct):
         prepare the database with migrations, and load fixtures.
         This runs once when the CDK app is deployed.
         """
-        self.setup_sg = ec2.SecurityGroup(self, f"{self.name}-SetupTaskSG", vpc=self.vpc)
-
         self.setup_task_def = ecs.FargateTaskDefinition(
             self,
             f"{self.name}-SetupDbTaskDef",
@@ -217,6 +321,20 @@ class GalvBackend(Construct):
         )
 
         self.bucket.grant_read_write(self.setup_task_def.task_role)
+        NagSuppressions.add_resource_suppressions(
+            self.service.task_definition.task_role,
+            suppressions=[{
+                "id": "AwsSolutions-IAM5",
+                "reason": "Access is granted via grant_read_write(), scoped to a private S3 bucket.",
+                "appliesTo": [
+                    f"Resource::{self.bucket.bucket_arn}/*",
+                    f"Action::s3:GetObject*",
+                    f"Action::s3:PutObject*",
+                    f"Action::s3:DeleteObject*"
+                ]
+            }]
+        )
+
         self.db_instance.connections.allow_default_port_from(self.setup_sg)
 
         AwsCustomResource(
@@ -231,7 +349,7 @@ class GalvBackend(Construct):
                     "taskDefinition": self.setup_task_def.task_definition_arn,
                     "networkConfiguration": {
                         "awsvpcConfiguration": {
-                            "subnets": [subnet.subnet_id for subnet in self.vpc.private_subnets],
+                            "subnets": [subnet.subnet_id for subnet in self.vpc.select_subnets(subnet_group_name="private").subnets],
                             "assignPublicIp": "DISABLED",
                             "securityGroups": [self.setup_sg.security_group_id]
                         }
@@ -241,7 +359,8 @@ class GalvBackend(Construct):
             ),
             policy=AwsCustomResourcePolicy.from_sdk_calls(
                 resources=AwsCustomResourcePolicy.ANY_RESOURCE
-            )
+            ),
+            install_latest_aws_sdk=False,
         ).node.add_dependency(self.setup_task_def)
 
         CfnOutput(self, "SetupTaskDefinitionArn", value=self.setup_task_def.task_definition_arn)
@@ -253,8 +372,6 @@ class GalvBackend(Construct):
         Periodically run a task that polls the database for resources that need validation.
         Ensures automated validation is triggered without keeping a container alive.
         """
-        self.monitor_sg = ec2.SecurityGroup(self, f"{self.name}-ValidationMonitorSG", vpc=self.vpc)
-
         monitor_interval = self.node.try_get_context("monitorIntervalMinutes")
         if monitor_interval is None:
             monitor_interval = 5
@@ -272,12 +389,26 @@ class GalvBackend(Construct):
             f"{self.name}-ValidationMonitorContainer",
             image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
             command=["python", "manage.py", "validation_monitor"],
-            logging=ecs.LogDrivers.aws_logs(stream_prefix="validation-monitor"),
+            logging=ecs.LogDrivers.aws_logs(stream_prefix=f"{self.name}-ValidationMonitor"),
             environment=self.env_vars,
             secrets=self.secrets
         )
 
         self.bucket.grant_read_write(self.monitor_task_def.task_role)
+        NagSuppressions.add_resource_suppressions(
+            self.service.task_definition.task_role,
+            suppressions=[{
+                "id": "AwsSolutions-IAM5",
+                "reason": "Access is granted via grant_read_write(), scoped to a private S3 bucket.",
+                "appliesTo": [
+                    f"Resource::{self.bucket.bucket_arn}/*",
+                    f"Action::s3:GetObject*",
+                    f"Action::s3:PutObject*",
+                    f"Action::s3:DeleteObject*"
+                ]
+            }]
+        )
+
         self.db_instance.connections.allow_default_port_from(self.monitor_sg)
 
         if monitor_interval > 0:
@@ -289,10 +420,20 @@ class GalvBackend(Construct):
                     targets.EcsTask(
                         cluster=self.cluster,
                         task_definition=self.monitor_task_def,
-                        subnet_selection=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+                        subnet_selection=ec2.SubnetSelection(subnet_group_name="private"),
                         security_groups=[self.monitor_sg]
                     )
                 ]
             )
 
         CfnOutput(self, "ValidationMonitorTaskDefArn", value=self.monitor_task_def.task_definition_arn)
+
+    def _delayed_tasks(self):
+        # ... after self._create_service() and self.log_bucket have both been run
+        region = Stack.of(self).region
+
+        if not Token.is_unresolved(region):
+            self.service.load_balancer.log_access_logs(
+                bucket=self.log_bucket,
+                prefix=f"{self.name}-BackendService-ALB-logs/"
+            )

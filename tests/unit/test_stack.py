@@ -4,8 +4,10 @@ _nvm_hack.hack_nvm_path()
 # /HH
 
 import unittest
-from aws_cdk import App
+from aws_cdk import App, Aspects, assertions
 from aws_cdk.assertions import Template, Match
+from constructs import IConstruct
+from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 
 from galv_cdk.galv_stack import GalvStack
 
@@ -30,10 +32,44 @@ class TestGalvStack(unittest.TestCase):
                 "DJANGO_SUPERUSER_PASSWORD",
                 "DJANGO_SECRET_KEY"
             ],
+            "frontendSubdomain": "",
+            "backendSubdomain": "api",
+            "domainName": "example.com",
+            "isRoute53Domain": False
         })
-        self.stack = GalvStack(self.app, "TestStack")
+        Aspects.of(self.app).add(AwsSolutionsChecks(verbose=True))
+        Aspects.of(self.app).add(HIPAASecurityChecks())
+        # Create the stack using a dummy certificate ARN
+        self.stack = GalvStack(self.app, "TestStack", env={"region": "eu-west-2"}, certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012")
         self.template = Template.from_stack(self.stack)
         self.project_tag = self.app.node.try_get_context("projectNameTag") or "galv"
+
+    def test_no_unsuppressed_nag_findings(self):
+        """
+        Test that there are no unsuppressed CDK Nag findings in the stack
+        """
+        self.app.synth()
+        findings = []
+
+        def collect_findings(scope: IConstruct):
+            for child in scope.node.children:
+                collect_findings(child)
+                for entry in child.node.metadata:
+                    # Catch legacy annotations
+                    if entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
+                        findings.append((child.node.path, entry.data))
+                    # Catch CDK Nag findings from cdk_nag rule packs
+                    if entry.type == "cdk_nag":
+                        level = entry.data.get("level")
+                        rule_id = entry.data.get("ruleId")
+                        message = entry.data.get("info", "")
+                        findings.append((child.node.path, f"{rule_id} [{level}]: {message}"))
+
+        collect_findings(self.app)
+
+        if findings:
+            formatted = "\n".join(f"[{path}] {msg}" for path, msg in findings)
+            self.fail(f"Unresolved CDK Nag findings:\n{formatted}")
 
     def assert_env_var_present(self, var_name):
         self.template.has_resource_properties("AWS::ECS::TaskDefinition", {
@@ -66,15 +102,47 @@ class TestGalvStack(unittest.TestCase):
             }
         })
 
-    def test_backend_bucket_created(self):
-        resources = self.template.find_resources("AWS::S3::Bucket")
+    def test_backend_and_log_buckets_exist_and_configured(self):
+        resources = self.template.to_json().get("Resources", {})
 
-        matching_backend_buckets = [
-            res for res in resources.values()
-            if "WebsiteConfiguration" not in res.get("Properties", {})
+        backend_buckets = [
+            (name, res) for name, res in resources.items()
+            if res["Type"] == "AWS::S3::Bucket"
+            and "BackendStorage" in name
+        ]
+        log_buckets = [
+            (name, res) for name, res in resources.items()
+            if res["Type"] == "AWS::S3::Bucket"
+            and "LogBucket" in name
         ]
 
-        self.assertEqual(len(matching_backend_buckets), 1, "Expected exactly one backend S3 bucket")
+        self.assertEqual(len(backend_buckets), 1, "Expected one backend bucket")
+        self.assertEqual(len(log_buckets), 1, "Expected one log bucket")
+
+        backend_bucket = backend_buckets[0][1]
+        log_bucket = log_buckets[0][1]
+
+        # Check backend bucket has KMS encryption
+        encryption_config = backend_bucket["Properties"].get("BucketEncryption", {})
+        self.assertIn("ServerSideEncryptionConfiguration", encryption_config)
+        algo = encryption_config["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["SSEAlgorithm"]
+        self.assertEqual(algo, "aws:kms")
+
+        # Check logging is enabled
+        logging = backend_bucket["Properties"].get("LoggingConfiguration", {})
+        self.assertIn("DestinationBucketName", logging)
+        self.assertIn("BackendStorage-access-logs/", logging.get("LogFilePrefix"))
+
+        # Check public access block
+        public_block = backend_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
+        for key in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
+            self.assertTrue(public_block.get(key), f"{key} should be true on backend bucket")
+
+        # Log bucket should also block public access
+        log_public_block = log_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
+        for key in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
+            self.assertTrue(log_public_block.get(key), f"{key} should be true on log bucket")
+
 
     def test_rds_postgres_instance_created(self):
         self.template.has_resource_properties("AWS::RDS::DBInstance", {
@@ -234,6 +302,160 @@ class TestGalvStack(unittest.TestCase):
         # Should NOT create an Events::Rule
         template.resource_count_is("AWS::Events::Rule", 0)
 
+    def test_vpc_subnets_and_endpoints(self):
+        # Check Secrets Manager endpoint
+        self.template.has_resource_properties("AWS::EC2::VPCEndpoint", {
+            "ServiceName": assertions.Match.string_like_regexp("com.amazonaws.eu-west-2.secretsmanager")
+        })
+
+
+        # Secrets Manager interface endpoint
+        self.template.has_resource_properties("AWS::EC2::VPCEndpoint", {
+            "ServiceName": assertions.Match.string_like_regexp("secretsmanager")
+        })
+
+        # Check CloudWatch Logs endpoint
+        self.template.has_resource_properties("AWS::EC2::VPCEndpoint", {
+            "ServiceName": assertions.Match.string_like_regexp("com.amazonaws.eu-west-2.logs")
+        })
+
+        # VPC flow logs to S3
+        self.template.has_resource_properties("AWS::EC2::FlowLog", {
+            "LogDestinationType": "s3"
+        })
+
+    def test_no_default_security_groups(self):
+        """
+        Test that no default security groups are created
+        """
+        # Get the default SG logical ID
+        default_sg_logical_id = "DefaultSecurityGroup"
+
+        # Ensure no resource explicitly references the default SG
+        resources = self.template.to_json()["Resources"]
+        for logical_id, resource in resources.items():
+            props = resource.get("Properties", {})
+            if "SecurityGroupIds" in props:
+                sg_ids = props["SecurityGroupIds"]
+                self.assertNotIn(
+                    {"Ref": default_sg_logical_id},
+                    sg_ids,
+                    f"Resource {logical_id} uses the default security group"
+                )
+
+    def test_networked_resources_have_explicit_security_groups(self):
+        """
+        Ensure all network-connected resources explicitly declare security groups.
+        """
+        resources = self.template.to_json().get("Resources", {})
+        missing_sg = []
+
+        # Logical IDs of Lambda-backed custom resources that are exempt
+        allowed_lambda_ids = {
+            "BackendtestRunSetupTaskCustomResource",  # The Lambda used by AwsCustomResource to trigger Fargate setup
+        }
+
+        for logical_id, res in resources.items():
+            rtype = res.get("Type")
+            props = res.get("Properties", {})
+
+            if rtype == "AWS::RDS::DBInstance":
+                if not props.get("VPCSecurityGroups"):
+                    missing_sg.append((logical_id, rtype, props.get("DBInstanceIdentifier", "<no name>")))
+
+            elif rtype == "AWS::ECS::Service":
+                net_config = props.get("NetworkConfiguration", {}).get("AwsvpcConfiguration", {})
+                if not net_config.get("SecurityGroups"):
+                    missing_sg.append((logical_id, rtype, props.get("ServiceName", "<no name>")))
+
+            elif rtype == "AWS::Lambda::Function":
+                if (
+                        props.get("Handler") == "index.handler"
+                        and props.get("Runtime", "").startswith("nodejs")
+                        and props.get("FunctionName") is None
+                        and "VpcConfig" not in props
+                ):
+                    # Likely CDK-injected Lambda for AwsCustomResource. Skip.
+                    continue
+                vpc_config = props.get("VpcConfig", {})
+                if not vpc_config.get("SecurityGroupIds"):
+                    missing_sg.append((logical_id, rtype, props.get("FunctionName", "<no name>")))
+
+        if missing_sg:
+            lines = "\n".join(
+                f"{rtype} ({name}) [logical ID: {lid}] missing security group"
+                for lid, rtype, name in missing_sg
+            )
+            self.fail(f"The following resources are missing explicit security groups:\n{lines}")
+
+    def test_only_alb_in_public_subnet(self):
+        """
+        Ensure only the ALB is assigned to the public subnet.
+        """
+        resources = self.template.to_json().get("Resources", {})
+        public_subnet_ids = set()
+        violations = []
+
+        # Gather all public subnet logical IDs
+        for logical_id, res in resources.items():
+            if res.get("Type") == "AWS::EC2::Subnet" and "public" in logical_id.lower():
+                public_subnet_ids.add(logical_id)
+
+        # Check each resource with Subnet/NetworkConfiguration
+        for logical_id, res in resources.items():
+            rtype = res.get("Type")
+            props = res.get("Properties", {})
+
+            # Check ALB placement
+            if rtype == "AWS::ElasticLoadBalancingV2::LoadBalancer":
+                subnet_ids = props.get("Subnets", [])
+                for subnet in subnet_ids:
+                    if isinstance(subnet, dict) and "Ref" in subnet:
+                        subnet_id = subnet["Ref"]
+                        if subnet_id not in public_subnet_ids:
+                            violations.append((logical_id, "ALB uses a non-public subnet"))
+
+            # Check everything else
+            elif "Subnets" in props or "NetworkConfiguration" in props:
+                subnet_refs = []
+
+                if "Subnets" in props:
+                    subnet_refs = props["Subnets"]
+                elif "NetworkConfiguration" in props:
+                    awsvpc = props["NetworkConfiguration"].get("AwsvpcConfiguration", {})
+                    subnet_refs = awsvpc.get("Subnets", [])
+
+                for subnet in subnet_refs:
+                    if isinstance(subnet, dict) and "Ref" in subnet:
+                        subnet_id = subnet["Ref"]
+                        if subnet_id in public_subnet_ids:
+                            violations.append((logical_id, f"{rtype} assigned to public subnet"))
+
+        if violations:
+            details = "\n".join(f"{lid}: {msg}" for lid, msg in violations)
+            self.fail(f"The following resources are improperly assigned to public subnets:\n{details}")
+
+    def test_backend_certificate_created(self):
+        self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
+            "DomainName": "api.example.com",
+            "ValidationMethod": "DNS"
+        })
+
+    def test_frontend_certificate_created(self):
+        self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
+            "DomainName": "example.com",
+            "ValidationMethod": "DNS"
+        })
+
+    def test_cert_domains_and_cdn_aliases(self):
+        template = Template.from_stack(self.stack)
+
+        # Check CloudFront distribution uses expected alias
+        template.has_resource_properties("AWS::CloudFront::Distribution", {
+            "DistributionConfig": {
+                "Aliases": "example.com"
+            }
+        })
 
 if __name__ == '__main__':
     unittest.main()

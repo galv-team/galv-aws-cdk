@@ -18,6 +18,10 @@
     "frontendSecretsKeys": [],
     "backendSecretsName": "galv-backend-secrets",
     "backendSecretsKeys": [],
-    "monitorIntervalMinutes": 5
+    "monitorIntervalMinutes": 5,
+    "frontendSubdomain": "",
+    "backendSubdomain": "api",
+    "domainName": "example.com",
+    "isRoute53Domain": false
   }
 }
