@@ -25,9 +25,9 @@ class TestGalvStack(unittest.TestCase):
                 "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "",
                 "DJANGO_USER_ACTIVATION_TOKEN_EXPIRY_S": ""
             },
-            "frontendSecretsName": "galv-frontend-secrets",
+            "frontendSecretsName": "galv-frontend-secrets-ABCDEF",
             "frontendSecretsKeys": [],
-            "backendSecretsName": "galv-backend-secrets",
+            "backendSecretsName": "galv-backend-secrets-ABCDEF",
             "backendSecretsKeys": [
                 "DJANGO_SUPERUSER_PASSWORD",
                 "DJANGO_SECRET_KEY"
@@ -35,12 +35,19 @@ class TestGalvStack(unittest.TestCase):
             "frontendSubdomain": "",
             "backendSubdomain": "api",
             "domainName": "example.com",
-            "isRoute53Domain": False
+            "isRoute53Domain": True
         })
         Aspects.of(self.app).add(AwsSolutionsChecks(verbose=True))
         Aspects.of(self.app).add(HIPAASecurityChecks())
-        # Create the stack using a dummy certificate ARN
-        self.stack = GalvStack(self.app, "TestStack", env={"region": "eu-west-2"}, certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012")
+
+        self.stack = GalvStack(
+            self.app,
+            "TestStack",
+            env={
+                "account": "123456789012",
+                "region": "eu-west-2"
+            }
+        )
         self.template = Template.from_stack(self.stack)
         self.project_tag = self.app.node.try_get_context("projectNameTag") or "galv"
 
@@ -108,12 +115,12 @@ class TestGalvStack(unittest.TestCase):
         backend_buckets = [
             (name, res) for name, res in resources.items()
             if res["Type"] == "AWS::S3::Bucket"
-            and "BackendStorage" in name
+               and "BackendStorage" in name
         ]
         log_buckets = [
             (name, res) for name, res in resources.items()
             if res["Type"] == "AWS::S3::Bucket"
-            and "LogBucket" in name
+               and "LogBucket" in name
         ]
 
         self.assertEqual(len(backend_buckets), 1, "Expected one backend bucket")
@@ -282,9 +289,10 @@ class TestGalvStack(unittest.TestCase):
         app = App(context={
             "name": "test",
             "monitorIntervalMinutes": 5,
-            "mailFromDomain": "example.com"
+            "mailFromDomain": "example.com",
+            "domainName": "example.com",
         })
-        stack = GalvStack(app, "TestStack")
+        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
         template = Template.from_stack(stack)
 
         # Should create an Events::Rule to run the task
@@ -294,9 +302,10 @@ class TestGalvStack(unittest.TestCase):
         app = App(context={
             "name": "test",
             "monitorIntervalMinutes": 0,
-            "mailFromDomain": "example.com"
+            "mailFromDomain": "example.com",
+            "domainName": "example.com",
         })
-        stack = GalvStack(app, "TestStack")
+        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
         template = Template.from_stack(stack)
 
         # Should NOT create an Events::Rule
@@ -443,7 +452,7 @@ class TestGalvStack(unittest.TestCase):
 
     def test_frontend_certificate_created(self):
         self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
-            "DomainName": "example.com",
+            "DomainName": Match.string_like_regexp("^example.com$"),
             "ValidationMethod": "DNS"
         })
 
@@ -453,9 +462,31 @@ class TestGalvStack(unittest.TestCase):
         # Check CloudFront distribution uses expected alias
         template.has_resource_properties("AWS::CloudFront::Distribution", {
             "DistributionConfig": {
-                "Aliases": "example.com"
+                "Aliases": Match.array_with(["example.com"])
             }
         })
+
+
+def test_no_raw_wildcard_iam_policies(self):
+    """
+    Fails if any IAM policy contains '*' in Action/Resource without explicit appliesTo suppression.
+    """
+    resources = self.template.to_json().get("Resources", {})
+    for logical_id, res in resources.items():
+        if res.get("Type") == "AWS::IAM::Policy":
+            doc = res["Properties"].get("PolicyDocument", {})
+            statements = doc.get("Statement", [])
+            for stmt in statements:
+                action = stmt.get("Action")
+                resource = stmt.get("Resource")
+
+                # Single string or list
+                actions = [action] if isinstance(action, str) else action or []
+                resources_ = [resource] if isinstance(resource, str) else resource or []
+
+                if any(":" in a and a.endswith("*") for a in actions) or any(r == "*" for r in resources_):
+                    self.fail(f"Wildcard IAM policy found in {logical_id}: {stmt}")
+
 
 if __name__ == '__main__':
     unittest.main()

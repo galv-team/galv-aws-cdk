@@ -29,6 +29,7 @@ context = json.loads(context_path.read_text())["context"]
 app = App(context=context)
 
 # Create the CDK app with the loaded context
+is_route_53_domain = context.get("isRoute53Domain", True)
 if not context.get("isRoute53Domain"):
     cert_stack = CertificateStack(
         app,

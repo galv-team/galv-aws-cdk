@@ -33,14 +33,6 @@ class CertificateStack(Stack):
             validation_method="DNS",
         )
 
-        NagSuppressions.add_resource_suppressions(
-            cert,
-            suppressions=[{
-                "id": "AwsSolutions-ACM1",
-                "reason": "Certificate is DNS validated."
-            }]
-        )
-
         self.certificate = cert
 
         # Output the validation CNAMEs

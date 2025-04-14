@@ -8,6 +8,8 @@ from galv_cdk.frontend import GalvFrontend
 from galv_cdk.backend import GalvBackend
 import re
 
+from nag_supressions import suppress_nags
+
 
 class GalvStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, certificate_arn: str|None = None, **kwargs) -> None:
@@ -35,11 +37,15 @@ class GalvStack(Stack):
 
         Tags.of(self).add("project-name", project_tag)
 
+        suppress_nags(self, self.name)
+
     def _create_domain_certificates(self):
         domain_name = self.node.try_get_context("domainName")
         frontend_subdomain = self.node.try_get_context("frontendSubdomain") or ""
         backend_subdomain = self.node.try_get_context("backendSubdomain") or "api"
-        is_route53_domain = self.node.try_get_context("isRoute53Domain") or False
+        is_route53_domain = self.node.try_get_context("isRoute53Domain")
+        if is_route53_domain is None:
+            is_route53_domain = True
 
         self.frontend_fqdn = f"{frontend_subdomain}.{domain_name}".lstrip(".")
         self.backend_fqdn = f"{backend_subdomain}.{domain_name}".lstrip(".")
@@ -49,21 +55,21 @@ class GalvStack(Stack):
 
         if self.certificate_arn:
             # Use existing certificate ARN if provided
-            self.frontend_cert = acm.Certificate.from_certificate_arn(self, "FrontendCert", self.certificate_arn)
+            self.frontend_cert = acm.Certificate.from_certificate_arn(self, "FrontendCertificate", self.certificate_arn)
+            self.backend_cert = acm.Certificate.from_certificate_arn(self, "BackendCertificate", self.certificate_arn)
         else:
-            self.frontend_cert = None
+            if not is_route53_domain:
+                raise ValueError("Route53 must manage the domain if no certificate ARN is provided.")
 
-        # Lookup hosted zone if Route 53-managed
-        if is_route53_domain:
+            # Use DNS validation with Route 53
             zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=domain_name)
 
-            if self.frontend_cert is None:
-                self.frontend_cert = acm.Certificate(
-                    self,
-                    "FrontendCertificate",
-                    domain_name=self.frontend_fqdn,
-                    validation=acm.CertificateValidation.from_dns(zone),
-                )
+            self.frontend_cert = acm.Certificate(
+                self,
+                "FrontendCertificate",
+                domain_name=self.frontend_fqdn,
+                validation=acm.CertificateValidation.from_dns(zone),
+            )
 
             self.backend_cert = acm.Certificate(
                 self,
@@ -71,38 +77,6 @@ class GalvStack(Stack):
                 domain_name=self.backend_fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )
-        else:
-            # Use DNS validation without Route 53 (requires user to add validation records manually)
-            if self.frontend_cert is None:
-                self.frontend_cert = acm.CfnCertificate(
-                    self,
-                    "FrontendCertificate",
-                    domain_name=self.frontend_fqdn,
-                    validation_method="DNS",
-                )
-                for idx, domain_validation in enumerate(self.frontend_cert.domain_validation_options or []):
-                    CfnOutput(
-                        self,
-                        f"FrontendCertValidation{idx}",
-                        value=f"{domain_validation['domainName']}: {domain_validation['resourceRecord']['name']} -> {domain_validation['resourceRecord']['value']}",
-                        description="Add this CNAME record to validate the frontend certificate"
-                    )
-
-            self.backend_cert = acm.CfnCertificate(
-                self,
-                "BackendCertificate",
-                domain_name=self.backend_fqdn,
-                validation_method="DNS",
-            )
-
-            # Output validation CNAMEs for manual setup
-            for idx, domain_validation in enumerate(self.backend_cert.domain_validation_options or []):
-                CfnOutput(
-                    self,
-                    f"BackendCertValidation{idx}",
-                    value=f"{domain_validation['domainName']}: {domain_validation['resourceRecord']['name']} -> {domain_validation['resourceRecord']['value']}",
-                    description="Add this CNAME record to validate the backend certificate"
-                )
 
     def _create_log_bucket(self):
         """
@@ -147,28 +121,6 @@ class GalvStack(Stack):
                     }
                 }
             )
-        )
-
-        NagSuppressions.add_resource_suppressions(
-            self.log_bucket,
-            suppressions=[
-                {
-                    "id": "HIPAA.Security-S3BucketVersioningEnabled",
-                    "reason": "Log data is append-only; versioning not required"
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
-                    "reason": "Cross-region replication not needed for logs"
-                },
-                {
-                    "id": "HIPAA.Security-S3DefaultEncryptionKMS",
-                    "reason": "ALB access logs cannot be delivered to a KMS-encrypted bucket; S3-managed encryption is used instead."
-                },
-                {
-                    "id": "AwsSolutions-S10",
-                    "reason": "ALB access logs require a bucket without enforced aws:SecureTransport policies; encryption is still applied using S3-managed keys."
-                }
-            ]
         )
 
     def _create_vpc(self):
@@ -223,45 +175,3 @@ class GalvStack(Stack):
             security_groups=[vpc_endpoint_sg],
             subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
         )
-
-        NagSuppressions.add_resource_suppressions(
-            vpc_endpoint_sg,
-            suppressions=[
-                {
-                    "id": "AwsSolutions-EC23",
-                    "reason": "CDK Nag cannot evaluate VPC CIDR block when used in ingress rule. Ingress is correctly scoped to internal HTTPS only."
-                },
-                {
-                    "id": "HIPAA.Security-EC2RestrictedCommonPorts",
-                    "reason": "CDK Nag cannot evaluate VPC CIDR block when used in ingress rule. Port 443 is appropriately restricted to internal use."
-                },
-                {
-                    "id": "HIPAA.Security-EC2RestrictedSSH",
-                    "reason": "This rule only allows HTTPS (port 443); SSH is not allowed. False positive caused by evaluation error."
-                },
-            ]
-        )
-
-        NagSuppressions.add_resource_suppressions(
-            self.vpc,
-            suppressions=[{
-                "id": "HIPAA.Security-VPCDefaultSecurityGroupClosed",
-                "reason": "The default security group is not used by any resource (confirmed with unit test). All resources use explicitly assigned SGs."
-            }]
-        )
-
-        subnet_regex = re.compile(r"publicSubnet\d+/DefaultRoute")
-        for child in self.vpc.node.find_all():
-            if subnet_regex.search(child.node.path) and isinstance(child, ec2.CfnRoute):
-                # Add suppression for the route
-                NagSuppressions.add_resource_suppressions(
-                    child,
-                    suppressions=[{
-                        "id": "HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
-                        "reason": (
-                            "This route is required for public subnet internet access. "
-                            "Only the ALB uses this subnet, which is verified by unit tests."
-                        )
-                    }],
-                    apply_to_children=True
-                )

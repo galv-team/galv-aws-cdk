@@ -22,6 +22,6 @@
     "frontendSubdomain": "",
     "backendSubdomain": "api",
     "domainName": "example.com",
-    "isRoute53Domain": false
+    "isRoute53Domain": true
   }
 }

@@ -3,9 +3,12 @@ import string
 
 from aws_cdk import Stack
 from aws_cdk.aws_s3 import IBucket
+from cdk_nag import NagSuppressions
 from constructs import IConstruct
 import aws_cdk.aws_wafv2 as wafv2
 import aws_cdk.aws_iam as iam
+from aws_cdk.custom_resources import AwsCustomResource
+
 
 def generate_django_secret_key(length: int = 50) -> str:
     allowed_chars = string.ascii_letters + string.digits + string.punctuation
@@ -23,6 +26,7 @@ def inject_protected_env(env: dict, protected: dict):
             raise ValueError(f"You cannot specify reserved environment variable '{key}'.")
         env[key] = value
 
+
 def print_nag_findings(scope: IConstruct):
     for node in scope.node.children:
         # Recurse into child nodes
@@ -35,6 +39,7 @@ def print_nag_findings(scope: IConstruct):
                 print(f"[Warning] {node.node.path}: {entry.data}")
             elif entry.type == "aws:cdk:error":
                 print(f"[Error] {node.node.path}: {entry.data}")
+
 
 def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucket: IBucket) -> wafv2.CfnWebACL:
     """

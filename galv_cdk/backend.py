@@ -106,19 +106,6 @@ class GalvBackend(Construct):
                 conditions={"Bool": {"aws:SecureTransport": "false"}}
             )
         )
-        NagSuppressions.add_resource_suppressions(
-            self.bucket,
-            suppressions=[
-                {
-                    "id": "HIPAA.Security-S3BucketVersioningEnabled",
-                    "reason": "Versioning is not required for backend data in this deployment"
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
-                    "reason": "Data replication is handled externally or not required"
-                }
-            ]
-        )
 
     def _create_database(self):
         """
@@ -262,21 +249,6 @@ class GalvBackend(Construct):
         )
 
         self.bucket.grant_read_write(self.service.task_definition.task_role)
-        NagSuppressions.add_resource_suppressions(
-            self.service.task_definition.task_role,
-            suppressions=[
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "appliesTo": [
-                        f"Resource::{self.bucket.bucket_arn}/*"
-                    ],
-                    "reason": (
-                        "Wildcard required to access dynamically named user uploads in S3. "
-                        "Access is scoped to this private bucket and validated by backend auth logic."
-                    )
-                }
-            ]
-        )
 
         self.db_instance.connections.allow_default_port_from(self.service.service)
         self.service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(443))
@@ -321,23 +293,10 @@ class GalvBackend(Construct):
         )
 
         self.bucket.grant_read_write(self.setup_task_def.task_role)
-        NagSuppressions.add_resource_suppressions(
-            self.service.task_definition.task_role,
-            suppressions=[{
-                "id": "AwsSolutions-IAM5",
-                "reason": "Access is granted via grant_read_write(), scoped to a private S3 bucket.",
-                "appliesTo": [
-                    f"Resource::{self.bucket.bucket_arn}/*",
-                    f"Action::s3:GetObject*",
-                    f"Action::s3:PutObject*",
-                    f"Action::s3:DeleteObject*"
-                ]
-            }]
-        )
 
         self.db_instance.connections.allow_default_port_from(self.setup_sg)
 
-        AwsCustomResource(
+        self.setup_task = AwsCustomResource(
             self,
             f"{self.name}-RunSetupTask",
             on_create=AwsSdkCall(
@@ -361,7 +320,9 @@ class GalvBackend(Construct):
                 resources=AwsCustomResourcePolicy.ANY_RESOURCE
             ),
             install_latest_aws_sdk=False,
-        ).node.add_dependency(self.setup_task_def)
+        )
+
+        self.setup_task.node.add_dependency(self.setup_task_def)
 
         CfnOutput(self, "SetupTaskDefinitionArn", value=self.setup_task_def.task_definition_arn)
         CfnOutput(self, "ClusterName", value=self.cluster.cluster_name)
@@ -395,24 +356,11 @@ class GalvBackend(Construct):
         )
 
         self.bucket.grant_read_write(self.monitor_task_def.task_role)
-        NagSuppressions.add_resource_suppressions(
-            self.service.task_definition.task_role,
-            suppressions=[{
-                "id": "AwsSolutions-IAM5",
-                "reason": "Access is granted via grant_read_write(), scoped to a private S3 bucket.",
-                "appliesTo": [
-                    f"Resource::{self.bucket.bucket_arn}/*",
-                    f"Action::s3:GetObject*",
-                    f"Action::s3:PutObject*",
-                    f"Action::s3:DeleteObject*"
-                ]
-            }]
-        )
 
         self.db_instance.connections.allow_default_port_from(self.monitor_sg)
 
         if monitor_interval > 0:
-            events.Rule(
+            rule = events.Rule(
                 self,
                 f"{self.name}-ValidationMonitorSchedule",
                 schedule=events.Schedule.rate(Duration.minutes(monitor_interval)),
