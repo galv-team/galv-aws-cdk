@@ -1,5 +1,7 @@
 # Horrible Hack to support NVM
 import _nvm_hack
+from nag_supressions import suppress_nags_post_synth
+
 _nvm_hack.hack_nvm_path()
 # /HH
 
@@ -25,9 +27,9 @@ class TestGalvStack(unittest.TestCase):
                 "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "",
                 "DJANGO_USER_ACTIVATION_TOKEN_EXPIRY_S": ""
             },
-            "frontendSecretsName": "galv-frontend-secrets",
+            "frontendSecretsName": "galv-frontend-secrets-ABCDEF",
             "frontendSecretsKeys": [],
-            "backendSecretsName": "galv-backend-secrets",
+            "backendSecretsName": "galv-backend-secrets-ABCDEF",
             "backendSecretsKeys": [
                 "DJANGO_SUPERUSER_PASSWORD",
                 "DJANGO_SECRET_KEY"
@@ -35,41 +37,81 @@ class TestGalvStack(unittest.TestCase):
             "frontendSubdomain": "",
             "backendSubdomain": "api",
             "domainName": "example.com",
-            "isRoute53Domain": False
+            "isRoute53Domain": True,
+            "enableContainerInsights": True,  # suppresses nag findings
         })
         Aspects.of(self.app).add(AwsSolutionsChecks(verbose=True))
         Aspects.of(self.app).add(HIPAASecurityChecks())
-        # Create the stack using a dummy certificate ARN
-        self.stack = GalvStack(self.app, "TestStack", env={"region": "eu-west-2"}, certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012")
+
+        self.stack = GalvStack(
+            self.app,
+            "TestStack",
+            env={
+                "account": "123456789012",
+                "region": "eu-west-2"
+            }
+        )
+        self.app.synth()
+        suppress_nags_post_synth(self.stack, self.stack.name)
+
         self.template = Template.from_stack(self.stack)
         self.project_tag = self.app.node.try_get_context("projectNameTag") or "galv"
 
     def test_no_unsuppressed_nag_findings(self):
         """
-        Test that there are no unsuppressed CDK Nag findings in the stack
+        Test that there are no unsuppressed CDK Nag findings in the stack.
+        If any are found, include suggestions on where to apply suppressions.
         """
-        self.app.synth()
         findings = []
 
         def collect_findings(scope: IConstruct):
             for child in scope.node.children:
                 collect_findings(child)
                 for entry in child.node.metadata:
-                    # Catch legacy annotations
-                    if entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
-                        findings.append((child.node.path, entry.data))
-                    # Catch CDK Nag findings from cdk_nag rule packs
+                    path = child.node.path
                     if entry.type == "cdk_nag":
                         level = entry.data.get("level")
                         rule_id = entry.data.get("ruleId")
                         message = entry.data.get("info", "")
-                        findings.append((child.node.path, f"{rule_id} [{level}]: {message}"))
+                        findings.append({
+                            "path": path,
+                            "rule_id": rule_id,
+                            "level": level,
+                            "message": message,
+                            "suggestion": f"[post-synth] NagSuppressions.add_resource_suppressions({path}.node.default_child, [{{'id': '{rule_id}', 'reason': 'TODO'}}])"
+                        })
+                    elif entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
+                        message = entry.data
+                        rule_id = None
+                        if isinstance(message, str) and ":" in message:
+                            # Extract rule ID prefix like 'AwsSolutions-CB4'
+                            rule_id = message.split(":", 1)[0].strip()
+
+                        target = f"{path}" if path.endswith("/Resource") else f"{path}.node.default_child"
+                        suggestion = (
+                            f"[pre-synth?] NagSuppressions.add_resource_suppressions({target}, ...), "
+                            f"[{{'id': '{rule_id}', 'reason': 'TODO'}}])"
+                            if rule_id else
+                            f"# Review suppression placement for {path}"
+                        )
+
+                        findings.append({
+                            "path": path,
+                            "rule_id": rule_id or entry.type,
+                            "level": "Error" if entry.type == "aws:cdk:error" else "Warning",
+                            "message": message,
+                            "suggestion": suggestion
+                        })
 
         collect_findings(self.app)
 
         if findings:
-            formatted = "\n".join(f"[{path}] {msg}" for path, msg in findings)
-            self.fail(f"Unresolved CDK Nag findings:\n{formatted}")
+            formatted = "\n\n".join(
+                f"[{f['level']}] {f['path']}: {f['rule_id']} - {f['message']}→ Suggest: {f['suggestion']}"
+                for f in findings
+            )
+            self.fail(f"{len(findings)} Unresolved CDK Nag findings:\n\n{formatted}")
+
 
     def assert_env_var_present(self, var_name):
         self.template.has_resource_properties("AWS::ECS::TaskDefinition", {
@@ -108,12 +150,12 @@ class TestGalvStack(unittest.TestCase):
         backend_buckets = [
             (name, res) for name, res in resources.items()
             if res["Type"] == "AWS::S3::Bucket"
-            and "BackendStorage" in name
+               and "BackendStorage" in name
         ]
         log_buckets = [
             (name, res) for name, res in resources.items()
             if res["Type"] == "AWS::S3::Bucket"
-            and "LogBucket" in name
+               and "LogBucket" in name
         ]
 
         self.assertEqual(len(backend_buckets), 1, "Expected one backend bucket")
@@ -282,9 +324,10 @@ class TestGalvStack(unittest.TestCase):
         app = App(context={
             "name": "test",
             "monitorIntervalMinutes": 5,
-            "mailFromDomain": "example.com"
+            "mailFromDomain": "example.com",
+            "domainName": "example.com",
         })
-        stack = GalvStack(app, "TestStack")
+        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
         template = Template.from_stack(stack)
 
         # Should create an Events::Rule to run the task
@@ -294,9 +337,10 @@ class TestGalvStack(unittest.TestCase):
         app = App(context={
             "name": "test",
             "monitorIntervalMinutes": 0,
-            "mailFromDomain": "example.com"
+            "mailFromDomain": "example.com",
+            "domainName": "example.com",
         })
-        stack = GalvStack(app, "TestStack")
+        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
         template = Template.from_stack(stack)
 
         # Should NOT create an Events::Rule
@@ -443,7 +487,7 @@ class TestGalvStack(unittest.TestCase):
 
     def test_frontend_certificate_created(self):
         self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
-            "DomainName": "example.com",
+            "DomainName": Match.string_like_regexp("^example.com$"),
             "ValidationMethod": "DNS"
         })
 
@@ -453,9 +497,31 @@ class TestGalvStack(unittest.TestCase):
         # Check CloudFront distribution uses expected alias
         template.has_resource_properties("AWS::CloudFront::Distribution", {
             "DistributionConfig": {
-                "Aliases": "example.com"
+                "Aliases": Match.array_with(["example.com"])
             }
         })
+
+
+def test_no_raw_wildcard_iam_policies(self):
+    """
+    Fails if any IAM policy contains '*' in Action/Resource without explicit appliesTo suppression.
+    """
+    resources = self.template.to_json().get("Resources", {})
+    for logical_id, res in resources.items():
+        if res.get("Type") == "AWS::IAM::Policy":
+            doc = res["Properties"].get("PolicyDocument", {})
+            statements = doc.get("Statement", [])
+            for stmt in statements:
+                action = stmt.get("Action")
+                resource = stmt.get("Resource")
+
+                # Single string or list
+                actions = [action] if isinstance(action, str) else action or []
+                resources_ = [resource] if isinstance(resource, str) else resource or []
+
+                if any(":" in a and a.endswith("*") for a in actions) or any(r == "*" for r in resources_):
+                    self.fail(f"Wildcard IAM policy found in {logical_id}: {stmt}")
+
 
 if __name__ == '__main__':
     unittest.main()

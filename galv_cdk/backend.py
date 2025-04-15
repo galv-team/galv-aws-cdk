@@ -106,19 +106,6 @@ class GalvBackend(Construct):
                 conditions={"Bool": {"aws:SecureTransport": "false"}}
             )
         )
-        NagSuppressions.add_resource_suppressions(
-            self.bucket,
-            suppressions=[
-                {
-                    "id": "HIPAA.Security-S3BucketVersioningEnabled",
-                    "reason": "Versioning is not required for backend data in this deployment"
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
-                    "reason": "Data replication is handled externally or not required"
-                }
-            ]
-        )
 
     def _create_database(self):
         """
@@ -221,13 +208,30 @@ class GalvBackend(Construct):
         Create the ECS cluster and backend service security group.
         Required for deploying all ECS-based tasks and services.
         """
-        self.cluster = ecs.Cluster(self, f"{self.name}-Cluster", vpc=self.vpc)
+        enable_insights = self.node.try_get_context("enableContainerInsights")
+        if enable_insights is None:
+            enable_insights = self.is_production
+
+        self.cluster = ecs.Cluster(
+            self,
+            f"{self.name}-Cluster",
+            vpc=self.vpc,
+            container_insights_v2=
+            ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED
+        )
 
     def _create_service(self):
         """
         Deploy the main backend web service using ECS Fargate and Load Balancing.
         Handles all user HTTP requests and hosts the Django application.
         """
+        web_log_group = logs.LogGroup(
+            self,
+            f"{self.name}-BackendWebLogGroup",
+            retention=self.log_retention,
+            encryption_key=self.kms_key
+        )
+
         self.service = ecs_patterns.ApplicationLoadBalancedFargateService(
             self,
             f"{self.name}-BackendService",
@@ -251,7 +255,7 @@ class GalvBackend(Construct):
                 command=["--bind", "0.0.0.0:8000", "config.wsgi"],
                 log_driver=ecs.LogDrivers.aws_logs(
                     stream_prefix=f"{self.name}-BackendService",
-                    log_retention=self.log_retention,
+                    log_group=web_log_group
                 )
             ),
             public_load_balancer=True,
@@ -262,21 +266,6 @@ class GalvBackend(Construct):
         )
 
         self.bucket.grant_read_write(self.service.task_definition.task_role)
-        NagSuppressions.add_resource_suppressions(
-            self.service.task_definition.task_role,
-            suppressions=[
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "appliesTo": [
-                        f"Resource::{self.bucket.bucket_arn}/*"
-                    ],
-                    "reason": (
-                        "Wildcard required to access dynamically named user uploads in S3. "
-                        "Access is scoped to this private bucket and validated by backend auth logic."
-                    )
-                }
-            ]
-        )
 
         self.db_instance.connections.allow_default_port_from(self.service.service)
         self.service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(443))
@@ -311,33 +300,30 @@ class GalvBackend(Construct):
             memory_limit_mib=1024
         )
 
+        log_group = logs.LogGroup(
+            self,
+            f"{self.name}-SetupDbLogGroup",
+            retention=self.log_retention,
+            encryption_key=self.kms_key
+        )
+
         self.setup_task_def.add_container(
             f"{self.name}-SetupDbContainer",
             image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
             command=["/code/setup_db.sh"],
-            logging=ecs.LogDrivers.aws_logs(stream_prefix="setup-db"),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="setup-db",
+                log_group=log_group,
+            ),
             environment=self.env_vars,
             secrets=self.secrets
         )
 
         self.bucket.grant_read_write(self.setup_task_def.task_role)
-        NagSuppressions.add_resource_suppressions(
-            self.service.task_definition.task_role,
-            suppressions=[{
-                "id": "AwsSolutions-IAM5",
-                "reason": "Access is granted via grant_read_write(), scoped to a private S3 bucket.",
-                "appliesTo": [
-                    f"Resource::{self.bucket.bucket_arn}/*",
-                    f"Action::s3:GetObject*",
-                    f"Action::s3:PutObject*",
-                    f"Action::s3:DeleteObject*"
-                ]
-            }]
-        )
 
         self.db_instance.connections.allow_default_port_from(self.setup_sg)
 
-        AwsCustomResource(
+        self.setup_task = AwsCustomResource(
             self,
             f"{self.name}-RunSetupTask",
             on_create=AwsSdkCall(
@@ -361,7 +347,9 @@ class GalvBackend(Construct):
                 resources=AwsCustomResourcePolicy.ANY_RESOURCE
             ),
             install_latest_aws_sdk=False,
-        ).node.add_dependency(self.setup_task_def)
+        )
+
+        self.setup_task.node.add_dependency(self.setup_task_def)
 
         CfnOutput(self, "SetupTaskDefinitionArn", value=self.setup_task_def.task_definition_arn)
         CfnOutput(self, "ClusterName", value=self.cluster.cluster_name)
@@ -385,34 +373,31 @@ class GalvBackend(Construct):
             memory_limit_mib=512
         )
 
+        log_group = logs.LogGroup(
+            self,
+            f"{self.name}-ValidationMonitorLogGroup",
+            retention=self.log_retention,
+            encryption_key=self.kms_key
+        )
+
         self.monitor_task_def.add_container(
             f"{self.name}-ValidationMonitorContainer",
             image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
             command=["python", "manage.py", "validation_monitor"],
-            logging=ecs.LogDrivers.aws_logs(stream_prefix=f"{self.name}-ValidationMonitor"),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix=f"{self.name}-ValidationMonitor",
+                log_group=log_group,
+            ),
             environment=self.env_vars,
             secrets=self.secrets
         )
 
         self.bucket.grant_read_write(self.monitor_task_def.task_role)
-        NagSuppressions.add_resource_suppressions(
-            self.service.task_definition.task_role,
-            suppressions=[{
-                "id": "AwsSolutions-IAM5",
-                "reason": "Access is granted via grant_read_write(), scoped to a private S3 bucket.",
-                "appliesTo": [
-                    f"Resource::{self.bucket.bucket_arn}/*",
-                    f"Action::s3:GetObject*",
-                    f"Action::s3:PutObject*",
-                    f"Action::s3:DeleteObject*"
-                ]
-            }]
-        )
 
         self.db_instance.connections.allow_default_port_from(self.monitor_sg)
 
         if monitor_interval > 0:
-            events.Rule(
+            rule = events.Rule(
                 self,
                 f"{self.name}-ValidationMonitorSchedule",
                 schedule=events.Schedule.rate(Duration.minutes(monitor_interval)),
@@ -437,3 +422,20 @@ class GalvBackend(Construct):
                 bucket=self.log_bucket,
                 prefix=f"{self.name}-BackendService-ALB-logs/"
             )
+
+
+        # Secure the ALB after its other settings are complete
+        alb = self.service.load_balancer.node.default_child
+
+        alb.add_property_override(
+            "LoadBalancerAttributes.0.Key", "routing.http.drop_invalid_header_fields.enabled"
+        )
+        alb.add_property_override(
+            "LoadBalancerAttributes.0.Value", "true"
+        )
+        alb.add_property_override(
+            "LoadBalancerAttributes.1.Key", "deletion_protection.enabled"
+        )
+        alb.add_property_override(
+            "LoadBalancerAttributes.1.Value", str(self.is_production).lower()
+        )

@@ -56,17 +56,6 @@ class GalvFrontend(Construct):
             )
         )
 
-        NagSuppressions.add_resource_suppressions(
-            website_bucket,
-            suppressions=[
-                {"id": "AwsSolutions-S1", "reason": "No need for server access logs on public static bucket"},
-                {"id": "AwsSolutions-S10", "reason": "HTTPS is enforced at CloudFront level, not S3"},
-                {"id": "HIPAA.Security-S3BucketReplicationEnabled", "reason": "Replication not needed for this bucket"},
-                {"id": "HIPAA.Security-S3DefaultEncryptionKMS", "reason": "Static assets only; encryption not required"},
-                {"id": "HIPAA.Security-S3BucketVersioningEnabled", "reason": "Frontend code is immutable; versioning unnecessary"}
-            ]
-        )
-
         frontend_oac = cloudfront.CfnOriginAccessControl(
             self,
             "FrontendOAC",
@@ -96,15 +85,6 @@ class GalvFrontend(Construct):
             domain_names=[fqdn],
             certificate=certificate
         )
-        NagSuppressions.add_resource_suppressions(
-            distribution.node.default_child,
-            suppressions=[
-                {
-                    "id": "AwsSolutions-CFR1",
-                    "reason": "Geo restrictions are not required for this public static site."
-                },
-            ],
-        )
 
         website_bucket.add_to_resource_policy(
             iam.PolicyStatement(
@@ -117,37 +97,6 @@ class GalvFrontend(Construct):
                     }
                 }
             )
-        )
-        NagSuppressions.add_resource_suppressions(
-            website_bucket,
-            suppressions=[
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "Wildcard is required to allow CloudFront access to all objects in the website bucket. "
-                        "Access is limited to a specific CloudFront distribution via AWS:SourceArn."
-                    ),
-                    "applies_to": [f"Resource::{website_bucket.bucket_arn}/*"]
-                },
-                {
-                    "id": "AwsSolutions-S5",
-                    "reason": "This bucket uses OAC with signed requests from CloudFront. Access is restricted via bucket policy."
-                }
-            ],
-            apply_to_children=True
-        )
-        NagSuppressions.add_resource_suppressions(
-            website_bucket.policy,
-            suppressions=[
-                {
-                    "id": "AwsSolutions-S10",
-                    "reason": "The bucket enforces SSL via a deny policy on non-SecureTransport requests."
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketSSLRequestsOnly",
-                    "reason": "The bucket enforces SSL via a deny policy on non-SecureTransport requests."
-                }
-            ]
         )
 
         build_project = codebuild.Project(
@@ -189,51 +138,6 @@ class GalvFrontend(Construct):
                     prefix=f"{name}-FrontendBuild-logs/"
                 ),
             ),
-        )
-
-        NagSuppressions.add_resource_suppressions(
-            build_project.role.node.find_child("DefaultPolicy"),
-            suppressions=[
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "appliesTo": [
-                        f"Resource::{website_bucket.bucket_arn}",
-                        f"Resource::{website_bucket.arn_for_objects('*')}"
-                    ],
-                    "reason": "Wildcard resource scoped to specific S3 bucket used for frontend build artifacts"
-                },
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "appliesTo": [
-                        f"Action::s3:GetObject*",
-                        f"Action::s3:GetBucket*",
-                        f"Action::s3:List*",
-                        f"Action::s3:DeleteObject*",
-                        f"Action::s3:Abort*",
-                        f"Resource::{website_bucket.bucket_arn}/*",
-                    ],
-                    "reason": "Frontend build artifacts are deployed to S3 via CodeBuild Artifacts.s3(), which uses these permissions."
-                },
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "Wildcard access to log bucket objects is used by CodeBuild for access logs and artifact staging."
-                    ),
-                    "applies_to": [f"Resource::{log_bucket.bucket_arn}/*"]
-                },
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "Wildcard permissions are required by CodeBuild to interact with network interfaces, log groups, "
-                        "and report groups with dynamic names generated at deployment time."
-                    ),
-                    "applies_to": [
-                        "Resource::arn:<AWS::Partition>:ec2:<AWS::Region>:<AWS::AccountId>:network-interface/*",
-                        f"Resource::arn:<AWS::Partition>:logs:{Stack.of(self).region}:{Stack.of(self).account}:log-group:/aws/codebuild/{build_project.project_name}:*",
-                        f"Resource::arn:<AWS::Partition>:codebuild:{Stack.of(self).region}:{Stack.of(self).account}:report-group/{build_project.project_name}-*"
-                    ]
-                }
-            ]
         )
 
         if self.node.try_get_context('isRoute53Domain'):
