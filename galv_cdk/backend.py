@@ -208,13 +208,30 @@ class GalvBackend(Construct):
         Create the ECS cluster and backend service security group.
         Required for deploying all ECS-based tasks and services.
         """
-        self.cluster = ecs.Cluster(self, f"{self.name}-Cluster", vpc=self.vpc)
+        enable_insights = self.node.try_get_context("enableContainerInsights")
+        if enable_insights is None:
+            enable_insights = self.is_production
+
+        self.cluster = ecs.Cluster(
+            self,
+            f"{self.name}-Cluster",
+            vpc=self.vpc,
+            container_insights_v2=
+            ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED
+        )
 
     def _create_service(self):
         """
         Deploy the main backend web service using ECS Fargate and Load Balancing.
         Handles all user HTTP requests and hosts the Django application.
         """
+        web_log_group = logs.LogGroup(
+            self,
+            f"{self.name}-BackendWebLogGroup",
+            retention=self.log_retention,
+            encryption_key=self.kms_key
+        )
+
         self.service = ecs_patterns.ApplicationLoadBalancedFargateService(
             self,
             f"{self.name}-BackendService",
@@ -238,7 +255,7 @@ class GalvBackend(Construct):
                 command=["--bind", "0.0.0.0:8000", "config.wsgi"],
                 log_driver=ecs.LogDrivers.aws_logs(
                     stream_prefix=f"{self.name}-BackendService",
-                    log_retention=self.log_retention,
+                    log_group=web_log_group
                 )
             ),
             public_load_balancer=True,
@@ -283,11 +300,21 @@ class GalvBackend(Construct):
             memory_limit_mib=1024
         )
 
+        log_group = logs.LogGroup(
+            self,
+            f"{self.name}-SetupDbLogGroup",
+            retention=self.log_retention,
+            encryption_key=self.kms_key
+        )
+
         self.setup_task_def.add_container(
             f"{self.name}-SetupDbContainer",
             image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
             command=["/code/setup_db.sh"],
-            logging=ecs.LogDrivers.aws_logs(stream_prefix="setup-db"),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="setup-db",
+                log_group=log_group,
+            ),
             environment=self.env_vars,
             secrets=self.secrets
         )
@@ -346,11 +373,21 @@ class GalvBackend(Construct):
             memory_limit_mib=512
         )
 
+        log_group = logs.LogGroup(
+            self,
+            f"{self.name}-ValidationMonitorLogGroup",
+            retention=self.log_retention,
+            encryption_key=self.kms_key
+        )
+
         self.monitor_task_def.add_container(
             f"{self.name}-ValidationMonitorContainer",
             image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
             command=["python", "manage.py", "validation_monitor"],
-            logging=ecs.LogDrivers.aws_logs(stream_prefix=f"{self.name}-ValidationMonitor"),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix=f"{self.name}-ValidationMonitor",
+                log_group=log_group,
+            ),
             environment=self.env_vars,
             secrets=self.secrets
         )
@@ -385,3 +422,20 @@ class GalvBackend(Construct):
                 bucket=self.log_bucket,
                 prefix=f"{self.name}-BackendService-ALB-logs/"
             )
+
+
+        # Secure the ALB after its other settings are complete
+        alb = self.service.load_balancer.node.default_child
+
+        alb.add_property_override(
+            "LoadBalancerAttributes.0.Key", "routing.http.drop_invalid_header_fields.enabled"
+        )
+        alb.add_property_override(
+            "LoadBalancerAttributes.0.Value", "true"
+        )
+        alb.add_property_override(
+            "LoadBalancerAttributes.1.Key", "deletion_protection.enabled"
+        )
+        alb.add_property_override(
+            "LoadBalancerAttributes.1.Value", str(self.is_production).lower()
+        )

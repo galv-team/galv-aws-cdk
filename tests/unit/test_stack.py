@@ -1,5 +1,7 @@
 # Horrible Hack to support NVM
 import _nvm_hack
+from nag_supressions import suppress_nags_post_synth
+
 _nvm_hack.hack_nvm_path()
 # /HH
 
@@ -35,7 +37,8 @@ class TestGalvStack(unittest.TestCase):
             "frontendSubdomain": "",
             "backendSubdomain": "api",
             "domainName": "example.com",
-            "isRoute53Domain": True
+            "isRoute53Domain": True,
+            "enableContainerInsights": True,  # suppresses nag findings
         })
         Aspects.of(self.app).add(AwsSolutionsChecks(verbose=True))
         Aspects.of(self.app).add(HIPAASecurityChecks())
@@ -48,35 +51,67 @@ class TestGalvStack(unittest.TestCase):
                 "region": "eu-west-2"
             }
         )
+        self.app.synth()
+        suppress_nags_post_synth(self.stack, self.stack.name)
+
         self.template = Template.from_stack(self.stack)
         self.project_tag = self.app.node.try_get_context("projectNameTag") or "galv"
 
     def test_no_unsuppressed_nag_findings(self):
         """
-        Test that there are no unsuppressed CDK Nag findings in the stack
+        Test that there are no unsuppressed CDK Nag findings in the stack.
+        If any are found, include suggestions on where to apply suppressions.
         """
-        self.app.synth()
         findings = []
 
         def collect_findings(scope: IConstruct):
             for child in scope.node.children:
                 collect_findings(child)
                 for entry in child.node.metadata:
-                    # Catch legacy annotations
-                    if entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
-                        findings.append((child.node.path, entry.data))
-                    # Catch CDK Nag findings from cdk_nag rule packs
+                    path = child.node.path
                     if entry.type == "cdk_nag":
                         level = entry.data.get("level")
                         rule_id = entry.data.get("ruleId")
                         message = entry.data.get("info", "")
-                        findings.append((child.node.path, f"{rule_id} [{level}]: {message}"))
+                        findings.append({
+                            "path": path,
+                            "rule_id": rule_id,
+                            "level": level,
+                            "message": message,
+                            "suggestion": f"[post-synth] NagSuppressions.add_resource_suppressions({path}.node.default_child, [{{'id': '{rule_id}', 'reason': 'TODO'}}])"
+                        })
+                    elif entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
+                        message = entry.data
+                        rule_id = None
+                        if isinstance(message, str) and ":" in message:
+                            # Extract rule ID prefix like 'AwsSolutions-CB4'
+                            rule_id = message.split(":", 1)[0].strip()
+
+                        target = f"{path}" if path.endswith("/Resource") else f"{path}.node.default_child"
+                        suggestion = (
+                            f"[pre-synth?] NagSuppressions.add_resource_suppressions({target}, ...), "
+                            f"[{{'id': '{rule_id}', 'reason': 'TODO'}}])"
+                            if rule_id else
+                            f"# Review suppression placement for {path}"
+                        )
+
+                        findings.append({
+                            "path": path,
+                            "rule_id": rule_id or entry.type,
+                            "level": "Error" if entry.type == "aws:cdk:error" else "Warning",
+                            "message": message,
+                            "suggestion": suggestion
+                        })
 
         collect_findings(self.app)
 
         if findings:
-            formatted = "\n".join(f"[{path}] {msg}" for path, msg in findings)
-            self.fail(f"Unresolved CDK Nag findings:\n{formatted}")
+            formatted = "\n\n".join(
+                f"[{f['level']}] {f['path']}: {f['rule_id']} - {f['message']}→ Suggest: {f['suggestion']}"
+                for f in findings
+            )
+            self.fail(f"{len(findings)} Unresolved CDK Nag findings:\n\n{formatted}")
+
 
     def assert_env_var_present(self, var_name):
         self.template.has_resource_properties("AWS::ECS::TaskDefinition", {

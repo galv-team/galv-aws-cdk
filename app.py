@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Horrible Hack to support NVM
 from cert_stack import CertificateStack
+from nag_supressions import suppress_nags_post_synth
 from tests.unit import _nvm_hack
 
 _nvm_hack.hack_nvm_path()
@@ -50,5 +51,8 @@ Aspects.of(app).add(AwsSolutionsChecks(verbose=True))
 Aspects.of(app).add(HIPAASecurityChecks())
 
 app.synth()
+
+# Disable specific CDK Nag rules
+suppress_nags_post_synth(stack, stack.name)
 
 print_nag_findings(stack)

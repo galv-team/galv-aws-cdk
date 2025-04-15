@@ -1,14 +1,11 @@
-from aws_cdk import Stack, Environment, Tags, RemovalPolicy, CfnOutput
-from aws_cdk import aws_ec2 as ec2, aws_s3 as s3, aws_iam as iam, aws_kms as kms, aws_certificatemanager as acm, aws_route53 as route53, aws_route53_targets as targets
+from aws_cdk import Stack, Tags, RemovalPolicy
+from aws_cdk import aws_ec2 as ec2, aws_s3 as s3, aws_iam as iam, aws_kms as kms, aws_certificatemanager as acm, \
+    aws_route53 as route53
+from constructs import Construct
 
-from cdk_nag import NagSuppressions
-from constructs import Construct, Node
-
-from galv_cdk.frontend import GalvFrontend
 from galv_cdk.backend import GalvBackend
-import re
-
-from nag_supressions import suppress_nags
+from galv_cdk.frontend import GalvFrontend
+from nag_supressions import suppress_nags_pre_synth
 
 
 class GalvStack(Stack):
@@ -37,7 +34,7 @@ class GalvStack(Stack):
 
         Tags.of(self).add("project-name", project_tag)
 
-        suppress_nags(self, self.name)
+        suppress_nags_pre_synth(self)
 
     def _create_domain_certificates(self):
         domain_name = self.node.try_get_context("domainName")
