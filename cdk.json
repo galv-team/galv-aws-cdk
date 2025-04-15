@@ -6,6 +6,7 @@
     "mailFromUser": "galv-no-reply",
     "projectNameTag": "galv",
     "backendVersion": "latest",
+    "frontendVersion": "latest",
     "isProduction": true,
     "frontendEnvironment": {},
     "backendEnvironment": {

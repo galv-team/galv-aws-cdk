@@ -36,27 +36,35 @@ The deployment will:
 - Schedule validation polling every 5 minutes
 - Build and deploy the static frontend to S3 + CloudFront
 
+Everything will be tagged with `project-name` = the project name for easy identification.
+
 ---
 
 ## ⚙️ Configuration: `cdk.json` Context Keys
 
 Configure your environment by editing `cdk.json`. The following table describes the key options:
 
-| Key                      | Description                                                               |
-| ------------------------ | ------------------------------------------------------------------------- |
-| `name`                   | A short name used to prefix resources                                     |
-| `backendVersion`         | Tag for backend Docker image (e.g. from GHCR)                             |
-| `projectNameTag`         | Used for tagging and grouping resources                                   |
-| `isProduction`           | Controls retention policies and protections (e.g., deletion protection)   |
-| `mailFromUser`           | Local part of the default email sender address                            |
-| `mailFromDomain`         | Domain for the default email sender address                               |
-| `frontendEnvironment`    | Key-value pairs of environment variables to pass to the frontend container |
-| `backendEnvironment`     | Key-value pairs of environment variables to pass to the backend container |
-| `frontendSecretsName`    | Name of the AWS Secrets Manager entry for frontend secrets                |
-| `frontendSecretsKeys`    | List of secret keys to inject into the frontend container                 |
-| `backendSecretsName`     | Name of the AWS Secrets Manager entry for backend secrets                 |
-| `backendSecretsKeys`     | List of secret keys to inject into the backend container                  |
-| `monitorIntervalMinutes` | How often to run the validation monitor task (0 disables it)              |
+| Key                       | Description                                                                                           |
+|---------------------------|-------------------------------------------------------------------------------------------------------|
+| `name`                    | A short name used to prefix resources                                                                 |
+| `backendVersion`          | Tag for backend Docker image (e.g. from GHCR)                                                         |
+| `frontendVersion`         | Tag for frontend Docker image (e.g. from GHCR)                                                        |
+| `projectNameTag`          | Used for tagging and grouping resources                                                               |
+| `isProduction`            | Controls retention policies and protections (e.g., deletion protection)                               |
+| `mailFromUser`            | Local part of the default email sender address                                                        |
+| `mailFromDomain`          | Domain for the default email sender address                                                           |
+| `frontendEnvironment`     | Key-value pairs of environment variables to pass to the frontend container                            |
+| `backendEnvironment`      | Key-value pairs of environment variables to pass to the backend container                             |
+| `frontendSecretsName`     | Name of the AWS Secrets Manager entry for frontend secrets                                            |
+| `frontendSecretsKeys`     | List of secret keys to inject into the frontend container                                             |
+| `backendSecretsName`      | Name of the AWS Secrets Manager entry for backend secrets                                             |
+| `backendSecretsKeys`      | List of secret keys to inject into the backend container                                              |
+| `monitorIntervalMinutes`  | How often to run the validation monitor task (0 disables it)                                          |
+| `frontendSubdomain`       | Subdomain for the frontend (e.g., `app`)                                                              |
+| `backendSubdomain`        | Subdomain for the backend (e.g., `api`)                                                               |
+| `domainName`              | Domain name for the application (e.g., `example.com`)                                                 |
+| `isRoute53Domain`         | Whether the domain is managed by Route 53 (true/false)                                                |
+| `enableContainerInsights` | Whether to enable CloudWatch Container Insights for ECS tasks (true/false). Defaults to isProduction. |
 
 Example `cdk.json`:
 
