@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Horrible Hack to support NVM
-from cert_stack import CertificateStack
-from nag_supressions import suppress_nags_post_synth
+import os
+
 from tests.unit import _nvm_hack
 
 _nvm_hack.hack_nvm_path()
@@ -13,6 +13,8 @@ import argparse
 import json
 from pathlib import Path
 from galv_cdk.galv_stack import GalvStack
+from galv_cdk.cert_stack import CertificateStack
+from galv_cdk.nag_supressions import suppress_nags_post_synth
 from utils import print_nag_findings
 
 # Parse command-line arguments
@@ -29,6 +31,9 @@ context = json.loads(context_path.read_text())["context"]
 
 app = App(context=context)
 
+account = os.environ.get("CDK_DEFAULT_ACCOUNT")
+region = os.environ.get("CDK_DEFAULT_REGION")
+
 # Create the CDK app with the loaded context
 is_route_53_domain = context.get("isRoute53Domain", True)
 if not context.get("isRoute53Domain"):
@@ -37,14 +42,14 @@ if not context.get("isRoute53Domain"):
         "CertStack",
         domain_name=context["domainName"],
         subdomain=context["frontendSubdomain"],
-        hosted_zone_id=context["hostedZoneId"]
+        hosted_zone_id=context["hostedZoneId"],
     )
     certificate_arn = cert_stack.certificate.certificate_arn
 else:
     certificate_arn = None
 
 # Instantiate the stack
-stack = GalvStack(app, "GalvStack", certificate_arn=certificate_arn)
+stack = GalvStack(app, "GalvStack", certificate_arn=certificate_arn, env={"account": account, "region": region})
 
 # Add CDK Nag rules
 Aspects.of(app).add(AwsSolutionsChecks(verbose=True))
