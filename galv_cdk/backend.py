@@ -194,10 +194,10 @@ class GalvBackend(Construct):
 
         secrets_name = self.node.try_get_context("backendSecretsName")
         if secrets_name:
-            full_secret = sm.Secret.from_secret_attributes(
+            full_secret = sm.Secret.from_secret_name_v2(
                 self,
                 "BackendSecrets",
-                secret_complete_arn=f"arn:aws:secretsmanager:{self.stack.region}:{self.stack.account}:secret:{secrets_name}"
+                secret_name=secrets_name
             )
             keys = self.node.try_get_context("backendSecretsKeys") or []
             for key in keys:
