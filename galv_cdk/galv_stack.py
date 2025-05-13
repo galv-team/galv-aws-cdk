@@ -22,15 +22,30 @@ class GalvStack(Stack):
 
         self.kms_key = kms.Key(self, f"{self.name}-KmsKey", enable_key_rotation=True)
 
+        self.kms_key.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowCloudWatchLogsEncryption",
+                actions=[
+                    "kms:Encrypt",
+                    "kms:Decrypt",
+                    "kms:GenerateDataKey*",
+                    "kms:DescribeKey"
+                ],
+                principals=[iam.ServicePrincipal("logs.amazonaws.com")],
+                resources=["*"]
+            )
+        )
+
         self._create_domain_certificates()
         self._create_log_bucket()
         self._create_vpc()
 
         # ==== Frontend Deployment ====
-        GalvFrontend(self, "Frontend", vpc=self.vpc, log_bucket=self.log_bucket, fqdn=self.frontend_fqdn, certificate=self.frontend_cert)
+        GalvFrontend(self, f"{self.name}-Frontend", vpc=self.vpc, log_bucket=self.log_bucket, fqdn=self.frontend_fqdn, certificate=self.frontend_cert)
 
         # ==== Backend Deployment ====
-        GalvBackend(self, "Backend", vpc=self.vpc, log_bucket=self.log_bucket, kms_key=self.kms_key, fqdn=self.backend_fqdn, backend_cert=self.backend_cert)
+        self.backend = GalvBackend(self, f"{self.name}-Backend", vpc=self.vpc, log_bucket=self.log_bucket, kms_key=self.kms_key, fqdn=self.backend_fqdn, backend_cert=self.backend_cert)
+        self.backend.node.add_dependency(self.kms_key)
 
         Tags.of(self).add("project-name", project_tag)
 
@@ -52,8 +67,8 @@ class GalvStack(Stack):
 
         if self.certificate_arn:
             # Use existing certificate ARN if provided
-            self.frontend_cert = acm.Certificate.from_certificate_arn(self, "FrontendCertificate", self.certificate_arn)
-            self.backend_cert = acm.Certificate.from_certificate_arn(self, "BackendCertificate", self.certificate_arn)
+            self.frontend_cert = acm.Certificate.from_certificate_arn(self, f"{self.name}-FrontendCertificate", self.certificate_arn)
+            self.backend_cert = acm.Certificate.from_certificate_arn(self, f"{self.name}-BackendCertificate", self.certificate_arn)
         else:
             if not is_route53_domain:
                 raise ValueError("Route53 must manage the domain if no certificate ARN is provided.")
@@ -63,7 +78,7 @@ class GalvStack(Stack):
 
             self.frontend_cert = acm.Certificate(
                 self,
-                "FrontendCertificate",
+                f"{self.name}-FrontendCertificate",
                 domain_name=self.frontend_fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )

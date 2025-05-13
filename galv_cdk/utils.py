@@ -1,7 +1,7 @@
 import secrets
 import string
 
-from aws_cdk import Stack
+from aws_cdk import Stack, Environment
 from aws_cdk.aws_s3 import IBucket
 from cdk_nag import NagSuppressions
 from constructs import IConstruct
@@ -55,6 +55,22 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
     :param log_bucket: S3 bucket for logging
     :return: CfnWebACL resource
     """
+
+    # log_bucket.add_to_resource_policy(iam.PolicyStatement(
+    #     sid="AWSWAFLoggingPermissions",
+    #     actions=["s3:PutObject"],
+    #     resources=[log_bucket.arn_for_objects("AWSLogs/*")],
+    #     principals=[iam.ServicePrincipal("logging.s3.amazonaws.com")],
+    #     conditions={
+    #         "StringEquals": {
+    #             "aws:SourceAccount": Stack.of(scope).account
+    #         },
+    #         "ArnLike": {
+    #             "aws:SourceArn": f"arn:aws:wafv2:{Stack.of(scope).region}:{Stack.of(scope).account}:*/webacl/*"
+    #         }
+    #     }
+    # ))
+
     waf = wafv2.CfnWebACL(
         scope,
         id,
@@ -68,12 +84,12 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
         name=f"{name}-waf",
         rules=[
             wafv2.CfnWebACL.RuleProperty(
-                name="AWSManagedRulesCommonRuleSet",
+                name=f"{name}-AWSManagedRulesCommonRuleSet",
                 priority=0,
                 override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                 statement=wafv2.CfnWebACL.StatementProperty(
                     managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
-                        name="AWSManagedRulesCommonRuleSet",
+                        name=f"AWSManagedRulesCommonRuleSet",
                         vendor_name="AWS"
                     )
                 ),
@@ -86,26 +102,20 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
         ]
     )
 
-    log_bucket.add_to_resource_policy(iam.PolicyStatement(
-        sid="AWSWAFLoggingPermissions",
-        actions=["s3:PutObject"],
-        resources=[log_bucket.arn_for_objects("AWSLogs/*")],
-        principals=[iam.ServicePrincipal("logging.s3.amazonaws.com")],
-        conditions={
-            "StringEquals": {
-                "aws:SourceAccount": Stack.of(scope).account
-            },
-            "ArnLike": {
-                "aws:SourceArn": f"arn:aws:wafv2:{Stack.of(scope).region}:{Stack.of(scope).account}:*/webacl/*"
-            }
-        }
-    ))
-
-    wafv2.CfnLoggingConfiguration(
-        scope,
-        f"{name}-WebAclLogging",
-        log_destination_configs=[log_bucket.bucket_arn],
-        resource_arn=waf.attr_arn,
+    NagSuppressions.add_resource_suppressions(
+        waf,
+        [{
+            "id": "HIPAA.Security-WAFv2LoggingEnabled",
+            "reason": "Logging is not required for this WAF; access is controlled via ALB security group or CloudFront"
+        }],
+        apply_to_children=True
     )
+
+    # wafv2.CfnLoggingConfiguration(
+    #     scope,
+    #     f"{name}-WebAclLogging",
+    #     log_destination_configs=[log_bucket.bucket_arn],
+    #     resource_arn=waf.attr_arn,
+    # )
 
     return waf

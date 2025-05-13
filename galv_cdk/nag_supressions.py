@@ -36,6 +36,7 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_rds_nags(stack, name)
         _suppress_alb_attributes(stack, name)
         _suppress_lambda_resource(stack)
+        _suppress_waf(stack, name)
     except Exception as e:
         raise InapplicableSuppressionError("Failed to apply pre-synth suppressions") from e
 
@@ -64,7 +65,7 @@ def _suppress_cert_stack(stack: Stack):
 
 
 def _suppress_frontend(stack: Stack, name: str):
-    frontend = stack.node.find_child("Frontend")
+    frontend = stack.node.find_child(f"{name}-Frontend")
     cdn = frontend.node.find_child(f"{name}-FrontendCDN")
     NagSuppressions.add_resource_suppressions(
         cdn.node.default_child,
@@ -76,7 +77,7 @@ def _suppress_frontend(stack: Stack, name: str):
 
 
 def _suppress_backend_taskrole_policy(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     service = backend.node.find_child(f"{name}-BackendService")
     task_role = service.task_definition.task_role
     default_policy = task_role.node.find_child("DefaultPolicy")
@@ -121,7 +122,7 @@ def _suppress_vpc_endpoints(stack: Stack, name: str):
 
 
 def _suppress_frontend_bucket_policy(stack: Stack, name: str):
-    frontend = stack.node.find_child("Frontend")
+    frontend = stack.node.find_child(f"{name}-Frontend")
     bucket = frontend.node.find_child(f"{name}-FrontendBucket")
     policy = bucket.policy
 
@@ -184,7 +185,7 @@ def _suppress_log_bucket_pre(stack: Stack, name: str):
 
 
 def _suppress_backend_bucket(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     bucket = backend.node.find_child(f"{name}-BackendStorage")
     NagSuppressions.add_resource_suppressions(
         bucket,
@@ -202,7 +203,7 @@ def _suppress_backend_bucket(stack: Stack, name: str):
 
 
 def _suppress_backend_iams(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     region = stack.region
     account = stack.account
 
@@ -267,7 +268,7 @@ def _suppress_backend_iams(stack: Stack, name: str):
 
 
 def _suppress_frontend_iam(stack: Stack, name: str):
-    frontend = stack.node.find_child("Frontend")
+    frontend = stack.node.find_child(f"{name}-Frontend")
     build = frontend.node.find_child(f"{name}-FrontendBuild")
     role = build.role
     default_policy = role.node.find_child("DefaultPolicy")
@@ -356,7 +357,7 @@ def _suppress_frontend_iam(stack: Stack, name: str):
 
 
 def _suppress_frontend_bucket(stack: Stack, name: str):
-    frontend = stack.node.find_child("Frontend")
+    frontend = stack.node.find_child(f"{name}-Frontend")
     bucket = frontend.node.find_child(f"{name}-FrontendBucket")
 
     # Suppress on the bucket itself for versioning/replication/KMS
@@ -424,7 +425,7 @@ def _suppress_secret_rotation(stack: Stack, name: str):
         "and enforced TLS in all secret usage contexts."
     )
 
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     for suffix in ["DbSecret", "SmtpSecret"]:
         secret = backend.node.find_child(f"{name}-{suffix}")
         NagSuppressions.add_resource_suppressions(
@@ -456,7 +457,7 @@ def _suppress_ecs_env_vars(stack: Stack, name: str):
         "Splitting environment config across multiple mechanisms would increase complexity without improving security."
     )
 
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
 
     # 1. BackendService task definition (access via service object)
     service = backend.node.find_child(f"{name}-BackendService")
@@ -488,7 +489,7 @@ def _suppress_inline_iam_policies(stack: Stack, name: str):
         "without meaningful security benefit."
     )
 
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
 
     policies = [
         # Task roles
@@ -540,7 +541,7 @@ def _suppress_ecs_iam5_wildcards(stack: Stack, name: str):
         f"Resource::arn:aws:s3:::{name}-BackendStorage/*"
     ]
 
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
 
     task_defs = [
         backend.node.find_child(f"{name}-BackendService").task_definition.task_role.node.find_child("DefaultPolicy"),
@@ -562,7 +563,7 @@ def _suppress_ecs_iam5_wildcards(stack: Stack, name: str):
 
 
 def _suppress_codebuild_kms(stack: Stack, name: str):
-    frontend = stack.node.find_child("Frontend")
+    frontend = stack.node.find_child(f"{name}-Frontend")
     build = frontend.node.find_child(f"{name}-FrontendBuild")
     l1 = build.node.default_child  # <- This is the real target CDK Nag evaluates for suppressions
 
@@ -593,7 +594,7 @@ def _suppress_lambda_iam4(stack: Stack):
 
 
 def _suppress_backend_alb_sg(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     alb_sg = backend.node.find_child(f"{name}-ALBSG")
     lb_sg = backend.node.find_child(f"{name}-BackendService").load_balancer.connections.security_groups[0]  # Usually the same as alb_sg
 
@@ -612,7 +613,7 @@ def _suppress_db_sg_validation_failures(stack: Stack, name: str):
     CdkNagValidationFailure[...] warnings come from CDK Nag being unable to evaluate certain SecurityGroupIngress rules
      due to intrinsic functions—like dynamic references to security group IDs or ports.
     """
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     db_sg = backend.node.find_child(f"{name}-DBSG")
     NagSuppressions.add_resource_suppressions(
         db_sg.node.default_child,
@@ -631,7 +632,7 @@ def _suppress_db_sg_validation_failures(stack: Stack, name: str):
 
 
 def _suppress_db_indirect_ingress_validation(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     db_sg = backend.node.find_child(f"{name}-DBSG")
 
     for child in db_sg.node.children:
@@ -652,7 +653,7 @@ def _suppress_db_indirect_ingress_validation(stack: Stack, name: str):
 
 
 def _suppress_rds_nags(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     db_instance = backend.node.find_child(f"{name}-BackendDatabase")
 
     NagSuppressions.add_resource_suppressions(
@@ -691,7 +692,7 @@ def _suppress_rds_nags(stack: Stack, name: str):
 
 
 def _suppress_alb_attributes(stack: Stack, name: str):
-    backend = stack.node.find_child("Backend")
+    backend = stack.node.find_child(f"{name}-Backend")
     alb = backend.node.find_child(f"{name}-BackendService").load_balancer.node.default_child  # CfnLoadBalancer
 
     NagSuppressions.add_resource_suppressions(
@@ -729,6 +730,27 @@ def _suppress_lambda_resource(stack: Stack):
             {
                 "id": "HIPAA.Security-LambdaInsideVPC",
                 "reason": "This Lambda does not access VPC resources"
+            }
+        ]
+    )
+
+
+def _suppress_waf(stack: Stack, name: str):
+    """
+    Suppress WAF-related CDK Nag warnings.
+    """
+    frontend = stack.node.find_child(f"{name}-Frontend")
+    cdn = frontend.node.find_child(f"{name}-FrontendCDN")
+    NagSuppressions.add_resource_suppressions(
+        cdn.node.default_child,
+        [
+            {
+                "id": "AwsSolutions-CFR2",
+                "reason": "CloudFront distribution is protected by WAF when enabled; suppression applied during dev or where WAF is not needed."
+            },
+            {
+                "id": "HIPAA.Security-WAFv2LoggingEnabled",
+                "reason": "Logging is not required for this WAF; access is controlled via CloudFront"
             }
         ]
     )

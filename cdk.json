@@ -7,7 +7,7 @@
     "projectNameTag": "galv-test",
     "backendVersion": "latest",
     "frontendVersion": "latest",
-    "isProduction": true,
+    "isProduction": false,
     "frontendEnvironment": {},
     "backendEnvironment": {
       "DJANGO_SUPERUSER_USERNAME": "admin",

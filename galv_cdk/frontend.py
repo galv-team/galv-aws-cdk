@@ -8,7 +8,7 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_route53_targets as route53_targets,
     RemovalPolicy,
-    Duration, Stack, CfnOutput,
+    Duration, Stack, CfnOutput, NestedStack, Environment,
 )
 from aws_cdk.aws_certificatemanager import ICertificate, Certificate
 from cdk_nag import NagSuppressions
@@ -29,8 +29,6 @@ class GalvFrontend(Construct):
 
         removal_policy = RemovalPolicy.RETAIN if is_production else RemovalPolicy.DESTROY
         auto_delete = False if is_production else True
-
-        web_acl_frontend = create_waf_scope_web_acl(self, "FrontendWebACL", name="frontend", scope_type="CLOUDFRONT", log_bucket=log_bucket)
 
         website_bucket = s3.Bucket(
             self,
@@ -68,6 +66,8 @@ class GalvFrontend(Construct):
             )
         )
 
+        waf_arn = self.node.try_get_context("frontendWafArn")
+
         distribution = cloudfront.Distribution(
             self,
             f"{name}-FrontendCDN",
@@ -81,7 +81,7 @@ class GalvFrontend(Construct):
             enable_logging=True,
             log_bucket=log_bucket,
             log_file_prefix=f"{name}-FrontendCDN-logs/",
-            web_acl_id=web_acl_frontend.attr_arn,
+            web_acl_id=waf_arn,
             domain_names=[fqdn],
             certificate=certificate
         )
@@ -135,7 +135,7 @@ class GalvFrontend(Construct):
             logging=codebuild.LoggingOptions(
                 s3=codebuild.S3LoggingOptions(
                     bucket=log_bucket,
-                    prefix=f"{name}-FrontendBuild-logs/"
+                    prefix=f"{name}-FrontendBuild-logs"
                 ),
             ),
         )

@@ -10,7 +10,42 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="\cdk.out\AwsSolutions-galv-test-FrontendWafStack-NagReport.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="\cdk.out\HIPAA.Security-GalvStack-NagReport.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\cdk.out\HIPAA.Security-GalvStackBackendbackendWebAclStack13888DDE-NagReport.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\cdk.out\HIPAA.Security-GalvStackFrontendfrontendWebAclStack31EA9BDA-NagReport.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\cdk.out\HIPAA.Security-galv-test-FrontendWafStack-NagReport.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\cdk.out\HIPAA.Security-galv-test-GalvStack-NagReport.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />

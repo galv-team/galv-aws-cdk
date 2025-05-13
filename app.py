@@ -3,6 +3,7 @@
 import os
 
 from tests.unit import _nvm_hack
+from waf_stack import FrontendWafStack
 
 _nvm_hack.hack_nvm_path()
 # /HH
@@ -34,12 +35,14 @@ app = App(context=context)
 account = os.environ.get("CDK_DEFAULT_ACCOUNT")
 region = os.environ.get("CDK_DEFAULT_REGION")
 
+name = app.node.try_get_context("name") or "galv"
+
 # Create the CDK app with the loaded context
 is_route_53_domain = context.get("isRoute53Domain", True)
 if not context.get("isRoute53Domain"):
     cert_stack = CertificateStack(
         app,
-        "CertStack",
+        f"{name}-CertStack",
         domain_name=context["domainName"],
         subdomain=context["frontendSubdomain"],
         hosted_zone_id=context["hostedZoneId"],
@@ -48,8 +51,10 @@ if not context.get("isRoute53Domain"):
 else:
     certificate_arn = None
 
+FrontendWafStack(app, f"{name}-FrontendWafStack", name=name)
+
 # Instantiate the stack
-stack = GalvStack(app, "GalvStack", certificate_arn=certificate_arn, env={"account": account, "region": region})
+stack = GalvStack(app, f"{name}-GalvStack", certificate_arn=certificate_arn, env={"account": account, "region": region})
 
 # Add CDK Nag rules
 Aspects.of(app).add(AwsSolutionsChecks(verbose=True))

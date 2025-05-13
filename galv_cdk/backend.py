@@ -121,7 +121,7 @@ class GalvBackend(Construct):
             self,
             f"{self.name}-BackendDatabase",
             engine=rds.DatabaseInstanceEngine.postgres(
-                version=rds.PostgresEngineVersion.VER_15_3
+                version=rds.PostgresEngineVersion.VER_16_3
             ),
             storage_encrypted=True,
             vpc=self.vpc,
@@ -136,6 +136,21 @@ class GalvBackend(Construct):
             deletion_protection=self.is_production,
             database_name="galvdb",
         )
+
+        if not self.is_production:
+            NagSuppressions.add_resource_suppressions(
+                self.db_instance.node.default_child,
+                [
+                    {
+                        "id": "AwsSolutions-RDS10",
+                        "reason": "Deletion protection is disabled in non-production environments for cost and flexibility."
+                    },
+                    {
+                        "id": "HIPAA.Security-RDSInstanceDeletionProtectionEnabled",
+                        "reason": "RDS deletion protection is not required outside production."
+                    }
+                ]
+            )
 
         self.secrets.update({
             "POSTGRES_PASSWORD": ecs.Secret.from_secrets_manager(self.db_secret, field="password"),
@@ -220,6 +235,17 @@ class GalvBackend(Construct):
             ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED
         )
 
+        if not enable_insights:
+            NagSuppressions.add_resource_suppressions(
+                self.cluster.node.default_child,
+                [
+                    {
+                        "id": "AwsSolutions-ECS4",
+                        "reason": "Container insights are disabled in dev to reduce CloudWatch costs."
+                    }
+                ]
+            )
+
     def _create_service(self):
         """
         Deploy the main backend web service using ECS Fargate and Load Balancing.
@@ -270,7 +296,7 @@ class GalvBackend(Construct):
         self.db_instance.connections.allow_default_port_from(self.service.service)
         self.service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(443))
 
-        web_acl_backend = create_waf_scope_web_acl(self, "BackendWebACL", name="backend", scope_type="REGIONAL", log_bucket=self.log_bucket)
+        web_acl_backend = create_waf_scope_web_acl(self, f"{self.name}-BackendWebACL", name=self.name, scope_type="REGIONAL", log_bucket=self.log_bucket)
         cfn_alb = self.service.load_balancer.node.default_child
         cfn_alb.web_acl_id = web_acl_backend.ref
 
@@ -279,7 +305,7 @@ class GalvBackend(Construct):
 
             route53.ARecord(
                 self,
-                "BackendAliasRecord",
+                f"{self.name}-BackendAliasRecord",
                 zone=zone,
                 record_name=self.fqdn,
                 target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(self.service.load_balancer)),
