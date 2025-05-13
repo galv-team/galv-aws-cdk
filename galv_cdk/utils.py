@@ -106,10 +106,6 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
         f"{name}-WebAclLogging",
         log_destination_configs=[log_bucket.bucket_arn],
         resource_arn=waf.attr_arn,
-        logging_filter=wafv2.CfnLoggingConfiguration.LoggingFilterProperty(
-            default_behavior="KEEP",
-            filters=[],
-        )
     )
 
     return waf

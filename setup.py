@@ -15,6 +15,7 @@ setuptools.setup(
     install_requires=[
         "aws-cdk-lib~=2.0",
         "constructs~=10.0",
+        "cdk-nag~=2.35",
     ],
     python_requires=">=3.8",
     classifiers=[
