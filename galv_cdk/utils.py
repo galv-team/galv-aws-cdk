@@ -119,3 +119,28 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
     # )
 
     return waf
+
+def get_aws_custom_cert_instructions(fqdn: str):
+    """
+    Generate instructions for creating an AWS Certificate Manager (ACM) certificate for a given domain name (FQDN).
+    The instructions include the command to create the certificate and the command to validate it using DNS.
+    """
+    return f"""No certificate ARN was provided, and this domain ({fqdn}) is not managed by Route53, so CDK cannot create and validate
+a certificate automatically.
+To proceed, you must manually create a certificate in AWS Certificate Manager (ACM).
+Instructions:
+1. In the AWS Console, switch to the region: us-east-1 (required for CloudFront certificates).
+2. Navigate to AWS Certificate Manager (ACM).
+3. Request a new public certificate for the domain:
+       {fqdn}
+4. Choose "DNS Validation".
+5. Complete the DNS setup as instructed (you will add a CNAME to your DNS provider).
+6. Once the certificate status shows "Issued", copy the certificate ARN.
+Then re-run the CDK deployment with the certificate ARN provided via context:
+    --context certificateArn=arn:aws:acm:us-east-1:<account-id>:certificate/<uuid>
+You can also store it in `cdk.json` like:
+    "context": {{
+        "certificateArn": "arn:aws:acm:us-east-1:<account-id>:certificate/<uuid>"
+    }}
+This step is required because CloudFormation cannot manage DNS validation for domains not hosted in Route53.
+    """

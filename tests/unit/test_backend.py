@@ -11,10 +11,10 @@ from aws_cdk.assertions import Template, Match
 from constructs import IConstruct
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 
-from galv_cdk.galv_stack import GalvStack
+from galv_cdk.galv_stack import GalvBackend
 
 
-class TestGalvStack(unittest.TestCase):
+class TestGalvBackend(unittest.TestCase):
     def setUp(self):
         self.app = App(context={
             "name": "test",
@@ -43,7 +43,7 @@ class TestGalvStack(unittest.TestCase):
         Aspects.of(self.app).add(AwsSolutionsChecks(verbose=True))
         Aspects.of(self.app).add(HIPAASecurityChecks())
 
-        self.stack = GalvStack(
+        self.stack = GalvBackend(
             self.app,
             "TestStack",
             env={
@@ -135,15 +135,6 @@ class TestGalvStack(unittest.TestCase):
             ])
         })
 
-    def test_frontend_bucket_created(self):
-        self.template.has_resource("AWS::S3::Bucket", {
-            "Properties": {
-                "WebsiteConfiguration": {
-                    "IndexDocument": "index.html"
-                }
-            }
-        })
-
     def test_backend_and_log_buckets_exist_and_configured(self):
         resources = self.template.to_json().get("Resources", {})
 
@@ -193,9 +184,6 @@ class TestGalvStack(unittest.TestCase):
 
     def test_django_backend_service_created(self):
         self.template.resource_count_is("AWS::ECS::Service", 1)
-
-    def test_react_frontend_distribution_created(self):
-        self.template.has_resource("AWS::CloudFront::Distribution", {})
 
     def test_all_resources_tagged_with_project_name(self):
         resources = self.template.to_json().get("Resources", {})
@@ -327,7 +315,7 @@ class TestGalvStack(unittest.TestCase):
             "mailFromDomain": "example.com",
             "domainName": "example.com",
         })
-        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
+        stack = GalvBackend(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
         template = Template.from_stack(stack)
 
         # Should create an Events::Rule to run the task
@@ -340,7 +328,7 @@ class TestGalvStack(unittest.TestCase):
             "mailFromDomain": "example.com",
             "domainName": "example.com",
         })
-        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
+        stack = GalvBackend(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
         template = Template.from_stack(stack)
 
         # Should NOT create an Events::Rule
@@ -485,43 +473,38 @@ class TestGalvStack(unittest.TestCase):
             "ValidationMethod": "DNS"
         })
 
-    def test_frontend_certificate_created(self):
-        self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
-            "DomainName": Match.string_like_regexp("^example.com$"),
-            "ValidationMethod": "DNS"
-        })
+    def test_no_dangerous_wildcard_iam_policies(self):
+        resources = self.template.to_json().get("Resources", {})
+        allowed_wildcards = {
+            "s3:GetObject*",
+            "s3:GetBucket*",
+            "s3:PutObject",
+            "s3:List*",
+            "s3:DeleteObject*",
+            "s3:Abort*",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*"
+        }
 
-    def test_cert_domains_and_cdn_aliases(self):
-        template = Template.from_stack(self.stack)
+        violations = []
 
-        # Check CloudFront distribution uses expected alias
-        template.has_resource_properties("AWS::CloudFront::Distribution", {
-            "DistributionConfig": {
-                "Aliases": Match.array_with(["example.com"])
-            }
-        })
+        for logical_id, res in resources.items():
+            if res.get("Type") == "AWS::IAM::Policy":
+                doc = res["Properties"].get("PolicyDocument", {})
+                statements = doc.get("Statement", [])
+                for stmt in statements:
+                    actions = stmt.get("Action", [])
+                    if isinstance(actions, str):
+                        actions = [actions]
 
+                    for action in actions:
+                        if "*" in action:
+                            # Deny s3:*, *, or anything not explicitly allowed
+                            if action not in allowed_wildcards:
+                                violations.append(f"{logical_id} uses disallowed action: {action}")
 
-def test_no_raw_wildcard_iam_policies(self):
-    """
-    Fails if any IAM policy contains '*' in Action/Resource without explicit appliesTo suppression.
-    """
-    resources = self.template.to_json().get("Resources", {})
-    for logical_id, res in resources.items():
-        if res.get("Type") == "AWS::IAM::Policy":
-            doc = res["Properties"].get("PolicyDocument", {})
-            statements = doc.get("Statement", [])
-            for stmt in statements:
-                action = stmt.get("Action")
-                resource = stmt.get("Resource")
-
-                # Single string or list
-                actions = [action] if isinstance(action, str) else action or []
-                resources_ = [resource] if isinstance(resource, str) else resource or []
-
-                if any(":" in a and a.endswith("*") for a in actions) or any(r == "*" for r in resources_):
-                    self.fail(f"Wildcard IAM policy found in {logical_id}: {stmt}")
-
+        if violations:
+            self.fail("Disallowed wildcard IAM actions:\n" + "\n".join(violations))
 
 if __name__ == '__main__':
     unittest.main()
