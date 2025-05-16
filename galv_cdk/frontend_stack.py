@@ -1,55 +1,54 @@
 from aws_cdk import (
-    aws_s3 as s3,
-    aws_cloudfront as cloudfront,
-    aws_cloudfront_origins as origins,
-    aws_codebuild as codebuild,
-    aws_iam as iam,
+    Stack, CfnOutput,
     aws_ec2 as ec2,
-    aws_route53 as route53,
-    aws_route53_targets as route53_targets,
+    aws_ecr as ecr,
+    aws_ecs as ecs,
+    aws_ecs_patterns as ecs_patterns,
     aws_certificatemanager as acm,
-    RemovalPolicy,
-    Stack, CfnOutput, Environment, Tags,
+    aws_route53 as route53,
+    aws_logs as logs,
+    aws_iam as iam,
+    aws_s3 as s3, RemovalPolicy,
 )
-from cdk_nag import NagSuppressions
 from constructs import Construct
-
 from nag_supressions import suppress_nags_pre_synth
-from utils import create_waf_scope_web_acl, get_aws_custom_cert_instructions
-
+from utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
 
 class GalvFrontend(Stack):
-    """
-    This all happens in US-East-1 because CloudFront is a global service.
-    """
-    def __init__(self, scope: Construct, id: str, *, certificate_arn: str = None, **kwargs) -> None:
-        env = kwargs.get("env", {})
-        env["region"] = "us-east-1"
-        try:
-            del kwargs["env"]
-        except KeyError:
-            pass
-        super().__init__(scope, id, env=Environment(**env), **kwargs)
+    def __init__(self, scope: Construct, id: str, certificate_arn: str = None, **kwargs) -> None:
+        super().__init__(scope, id, **kwargs)
 
         self.name = self.node.try_get_context("name") or "galv"
-        project_tag = self.node.try_get_context("projectNameTag") or "galv"
-        self.domain_name=self.node.get_context("domainName")
-        subdomain=self.node.get_context("frontendSubdomain")
-        self.fqdn = f"{subdomain}.{self.domain_name}".lstrip(".")
+        self.project_tag = self.node.try_get_context("projectNameTag") or "galv"
+        self.is_production = self.node.try_get_context("isProduction") or True
+        self.domain_name = self.node.get_context("domainName")
+        self.subdomain = self.node.get_context("frontendSubdomain")
+        self.fqdn = f"{self.subdomain}.{self.domain_name}".lstrip(".")
+        self.is_route53_domain = self.node.try_get_context("isRoute53Domain") or False
+        self.frontend_version = self.node.try_get_context("frontendVersion") or "latest"
 
-        try:
-            self.is_route53_domain = self.node.get_context("isRoute53Domain")
-        except KeyError:
-            self.is_route53_domain = True
+        self._create_log_bucket()
+        self._create_cert(certificate_arn)
+        self._create_vpc()
+        self._create_cluster()
+        self._create_service()
 
-        self.certificate_arn = certificate_arn
+        suppress_nags_pre_synth(self)
 
+    def _create_log_bucket(self):
+        """
+        Create an S3 Bucket for storing logs.
+        Some logs are stored in the bucket, and some are sent to CloudWatch, because not all logs can be sent to S3.
+        :return:
+        """
+        # ==== Log Bucket ====
         self.log_bucket = s3.Bucket(
             self,
-            f"{self.name}-FrontendLogBucket",
+            f"{self.name}-LogBucket",
             encryption=s3.BucketEncryption.S3_MANAGED,
             removal_policy=RemovalPolicy.DESTROY,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            auto_delete_objects=not self.is_production,
         )
 
         self.log_bucket.add_to_resource_policy(
@@ -65,196 +64,111 @@ class GalvFrontend(Stack):
             )
         )
 
-        self._create_bucket()
-        self._create_domain_certificates()
-        self._create_web_acl()
-        self._create_cloudfront()
-        self._create_codebuild()
-
-        Tags.of(self).add("project-name", project_tag)
-
-        suppress_nags_pre_synth(self)
-
-    def _create_bucket(self):
-        is_production = self.node.try_get_context("isProduction")
-        if is_production is None:
-            is_production = True
-
-        removal_policy = RemovalPolicy.RETAIN if is_production else RemovalPolicy.DESTROY
-        auto_delete = False if is_production else True
-
-        self.website_bucket = s3.Bucket(
-            self,
-            f"{self.name}-FrontendBucket",
-            website_index_document="index.html",
-            removal_policy=removal_policy,
-            auto_delete_objects=auto_delete,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            server_access_logs_bucket=self.log_bucket,
-            server_access_logs_prefix=f"{self.name}-FrontendStorage-access-logs/",
-        )
-
-        self.website_bucket.add_to_resource_policy(
+        self.log_bucket.add_to_resource_policy(
             iam.PolicyStatement(
-                actions=["s3:*"],
-                effect=iam.Effect.DENY,
-                principals=[iam.StarPrincipal()],
-                resources=[
-                    self.website_bucket.bucket_arn,
-                    self.website_bucket.arn_for_objects("*"),
+                sid="AllowALBLogging",
+                principals=[
+                    iam.ServicePrincipal("logdelivery.elasticloadbalancing.amazonaws.com"),
+                    iam.ServicePrincipal("delivery.logs.amazonaws.com")
                 ],
-                conditions={"Bool": {"aws:SecureTransport": "false"}},
-            )
-        )
-
-    def _create_domain_certificates(self):
-        # Create the CDK app with the loaded context
-        if self.certificate_arn is None and not self.is_route53_domain:
-            raise ValueError(get_aws_custom_cert_instructions(self.fqdn))
-
-        if self.is_route53_domain:
-            zone = route53.HostedZone.from_lookup(self, f"{self.name}-FrontendHostedZone", domain_name=self.domain_name)
-            self.certificate = acm.Certificate(
-                self,
-                f"{self.name}-FrontendCertificate",
-                domain_name=self.fqdn,
-                validation=acm.CertificateValidation.from_dns(zone),
-            )
-        else:
-            self.certificate = acm.Certificate.from_certificate_arn(self, f"{self.name}-FrontendCertificate", self.certificate_arn)
-
-    def _create_web_acl(self):
-        """
-        Create a WAFv2 WebACL for CloudFront with logging enabled.
-        """
-        self.web_acl = create_waf_scope_web_acl(self, f"{self.name}-FrontendWebACL", name="cloudfront-acl", scope_type="CLOUDFRONT", log_bucket=self.log_bucket)
-
-        NagSuppressions.add_resource_suppressions(
-            self.log_bucket,
-            [
-                {
-                    "id": "AwsSolutions-S1",
-                    "reason": "Server access logs are not needed on this bucket because it only receives logs (e.g., from WAF)."
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketLoggingEnabled",
-                    "reason": "This bucket only receives WAF logs and is not accessed directly."
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
-                    "reason": "Replication is not required for non-critical WAF log data."
-                },
-                {
-                    "id": "HIPAA.Security-S3BucketVersioningEnabled",
-                    "reason": "Versioning not needed for append-only log destination."
-                },
-                {
-                    "id": "HIPAA.Security-S3DefaultEncryptionKMS",
-                    "reason": "S3-managed encryption is sufficient for WAF logs."
-                }
-            ]
-        )
-
-    def _create_cloudfront(self):
-        self.frontend_oac = cloudfront.CfnOriginAccessControl(
-            self,
-            f"{self.name}-FrontendOAC",
-            origin_access_control_config=cloudfront.CfnOriginAccessControl.OriginAccessControlConfigProperty(
-                name="FrontendOAC",
-                origin_access_control_origin_type="s3",
-                signing_behavior="always",
-                signing_protocol="sigv4",
-                description="Access control for frontend bucket"
-            )
-        )
-
-        self.waf_arn = self.node.try_get_context("frontendWafArn")
-
-        self.distribution = cloudfront.Distribution(
-            self,
-            f"{self.name}-FrontendCDN",
-            default_behavior=cloudfront.BehaviorOptions(
-                origin=origins.S3BucketOrigin(
-                    self.website_bucket,
-                    origin_access_control_id=self.frontend_oac.attr_id
-                ),
-                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-            ),
-            enable_logging=True,
-            log_bucket=self.log_bucket,
-            log_file_prefix=f"{self.name}-FrontendCDN-logs/",
-            web_acl_id=self.waf_arn,
-            domain_names=[self.fqdn],
-            certificate=self.certificate
-        )
-
-        # Add Route 53 alias record for the CloudFront distribution
-        if self.is_route53_domain:
-            zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=self.domain_name)
-            route53.ARecord(
-                self,
-                f"{self.name}-FrontendAliasRecord",
-                zone=zone,
-                record_name=self.fqdn,
-                target=route53.RecordTarget.from_alias(
-                    route53_targets.CloudFrontTarget(self.distribution)
-                )
-            )
-        else:
-            CfnOutput(self, "FrontendCNAME", value=f"{self.fqdn} -> {self.distribution.distribution_domain_name}")
-
-        # Add a policy to allow CloudFront to access the S3 bucket
-        self.website_bucket.add_to_resource_policy(
-            iam.PolicyStatement(
-                actions=["s3:GetObject"],
-                resources=[self.website_bucket.arn_for_objects("*")],
-                principals=[iam.ServicePrincipal("cloudfront.amazonaws.com")],
+                actions=["s3:PutObject"],
+                resources=[self.log_bucket.arn_for_objects("AWSLogs/*")],
                 conditions={
                     "StringEquals": {
-                        "AWS:SourceArn": f"arn:aws:cloudfront::{Stack.of(self).account}:distribution/{self.distribution.distribution_id}"
+                        "s3:x-amz-acl": "bucket-owner-full-control"
                     }
                 }
             )
         )
 
-    def _create_codebuild(self):
-        frontend_version = self.node.try_get_context("frontendVersion") or "latest"
+    def _create_cert(self, certificate_arn: str):
+        if certificate_arn:
+            self.certificate = acm.Certificate.from_certificate_arn(
+                self, "FrontendCertificate", certificate_arn
+            )
+        elif self.is_route53_domain:
+            zone = route53.HostedZone.from_lookup(self, "FrontendZone", domain_name=self.domain_name)
+            self.certificate = acm.Certificate(
+                self,
+                "FrontendCertificate",
+                domain_name=self.fqdn,
+                validation=acm.CertificateValidation.from_dns(zone),
+            )
+        else:
+            raise ValueError(get_aws_custom_cert_instructions(self.fqdn))
 
-        self.build_project = codebuild.Project(
+    def _create_vpc(self):
+        self.vpc = ec2.Vpc(
             self,
-            f"{self.name}-FrontendBuild",
-            source=codebuild.Source.git_hub(
-                owner="galv-team",
-                repo="galv-frontend",
-                clone_depth=1,
-                fetch_submodules=False,
-                branch_or_ref=frontend_version,
-            ),
-            environment=codebuild.BuildEnvironment(
-                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
-                privileged=False,
-            ),
-            subnet_selection=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-            build_spec=codebuild.BuildSpec.from_object({
-                "version": "0.2",
-                "phases": {
-                    "install": {"commands": ["npm install"]},
-                    "build": {"commands": ["npm run build"]}
-                },
-                "artifacts": {
-                    "base-directory": "build",
-                    "files": ["**/*"]
-                }
-            }),
-            artifacts=codebuild.Artifacts.s3(
-                bucket=self.website_bucket,
-                package_zip=False,
-                include_build_id=False,
-            ),
-            logging=codebuild.LoggingOptions(
-                s3=codebuild.S3LoggingOptions(
-                    bucket=self.log_bucket,
-                    prefix=f"{self.name}-FrontendBuild-logs"
+            f"{self.name}-FrontendVpc",
+            max_azs=2,
+            nat_gateways=0,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC),
+                ec2.SubnetConfiguration(name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            ],
+            flow_logs={
+                "AllTraffic": ec2.FlowLogOptions(
+                    destination=ec2.FlowLogDestination.to_s3(self.log_bucket)
+                )
+            }
+        )
+
+    def _create_cluster(self):
+        self.cluster = ecs.Cluster(self, f"{self.name}-FrontendCluster", vpc=self.vpc)
+
+    def _create_service(self):
+        web_acl = create_waf_scope_web_acl(
+            self, f"{self.name}-FrontendWAF", name=f"{self.name}-frontend", scope_type="REGIONAL", log_bucket=None
+        )
+
+        log_group = logs.LogGroup(
+            self,
+            f"{self.name}-FrontendLogGroup",
+            retention=logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY,
+        )
+
+        repo = ecr.Repository.from_repository_name(
+            self,
+            f"{self.name}-FrontendRepo",
+            repository_name="galv-frontend"
+        )
+
+        service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self,
+            f"{self.name}-FrontendService",
+            cluster=self.cluster,
+            cpu=256,
+            memory_limit_mib=512,
+            desired_count=1,
+            public_load_balancer=True,
+            certificate=self.certificate,
+            domain_name=self.fqdn,
+            domain_zone=route53.HostedZone.from_lookup(self, "Zone", domain_name=self.domain_name),
+            redirect_http=True,
+            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+                image=ecs.ContainerImage.from_ecr_repository(
+                    repository=repo,
+                    tag=self.frontend_version
+                ),
+                container_port=80,
+                log_driver=ecs.LogDrivers.aws_logs(
+                    stream_prefix="galv-frontend",
+                    log_group=log_group,
                 ),
             ),
         )
+
+        # Attach WAF to ALB
+        alb = service.load_balancer.node.default_child
+        alb.add_property_override(
+            "WebACLId", web_acl.ref
+        )
+
+        # Secure ALB headers + optional output
+        alb.add_property_override("LoadBalancerAttributes", [
+            {"Key": "routing.http.drop_invalid_header_fields.enabled", "Value": "true"},
+            {"Key": "deletion_protection.enabled", "Value": str(self.is_production).lower()}
+        ])
+
+        CfnOutput(self, "FrontendUrl", value=f"https://{self.fqdn}")

@@ -1,5 +1,6 @@
 # Horrible Hack to support NVM
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
+from constructs import IConstruct
 
 import _nvm_hack
 from frontend_stack import GalvFrontend
@@ -56,71 +57,91 @@ class TestGalvFrontend(unittest.TestCase):
         self.template = Template.from_stack(self.stack)
         self.project_tag = self.app.node.try_get_context("projectNameTag") or "galv"
 
-    def test_web_acl_is_cloudfront_scoped(self):
-        self.template.has_resource_properties("AWS::WAFv2::WebACL", {
-            "Scope": "CLOUDFRONT"
+    def test_no_unsuppressed_nag_findings(self):
+        """
+        Test that there are no unsuppressed CDK Nag findings in the stack.
+        If any are found, include suggestions on where to apply suppressions.
+        """
+        findings = []
+
+        def collect_findings(scope: IConstruct):
+            for child in scope.node.children:
+                collect_findings(child)
+                for entry in child.node.metadata:
+                    path = child.node.path
+                    if entry.type == "cdk_nag":
+                        level = entry.data.get("level")
+                        rule_id = entry.data.get("ruleId")
+                        message = entry.data.get("info", "")
+                        findings.append({
+                            "path": path,
+                            "rule_id": rule_id,
+                            "level": level,
+                            "message": message,
+                            "suggestion": f"[post-synth] NagSuppressions.add_resource_suppressions({path}.node.default_child, [{{'id': '{rule_id}', 'reason': 'TODO'}}])"
+                        })
+                    elif entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
+                        message = entry.data
+                        rule_id = None
+                        if isinstance(message, str) and ":" in message:
+                            # Extract rule ID prefix like 'AwsSolutions-CB4'
+                            rule_id = message.split(":", 1)[0].strip()
+
+                        target = f"{path}" if path.endswith("/Resource") else f"{path}.node.default_child"
+                        suggestion = (
+                            f"[pre-synth?] NagSuppressions.add_resource_suppressions({target}, ...), "
+                            f"[{{'id': '{rule_id}', 'reason': 'TODO'}}])"
+                            if rule_id else
+                            f"# Review suppression placement for {path}"
+                        )
+
+                        findings.append({
+                            "path": path,
+                            "rule_id": rule_id or entry.type,
+                            "level": "Error" if entry.type == "aws:cdk:error" else "Warning",
+                            "message": message,
+                            "suggestion": suggestion
+                        })
+
+        collect_findings(self.app)
+
+        if findings:
+            formatted = "\n\n".join(
+                f"[{f['level']}] {f['path']}: {f['rule_id']} - {f['message']}→ Suggest: {f['suggestion']}"
+                for f in findings
+            )
+            self.fail(f"{len(findings)} Unresolved CDK Nag findings:\n\n{formatted}")
+
+    def test_alb_created(self):
+        self.template.resource_count_is("AWS::ElasticLoadBalancingV2::LoadBalancer", 1)
+
+    def test_ecs_service_exists(self):
+        self.template.resource_count_is("AWS::ECS::Service", 1)
+
+    def test_fargate_cluster_exists(self):
+        self.template.resource_count_is("AWS::ECS::Cluster", 1)
+
+    def test_certificate_created(self):
+        self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
+            "DomainName": Match.string_like_regexp("example\\.com"),
+            "ValidationMethod": "DNS"
         })
 
-    def test_web_acl_uses_aws_common_rules(self):
+    def test_route53_record_created(self):
+        self.template.resource_count_is("AWS::Route53::RecordSet", 1)
+
+    def test_waf_attached(self):
         self.template.has_resource_properties("AWS::WAFv2::WebACL", {
+            "Scope": "REGIONAL",
             "Rules": Match.array_with([
                 Match.object_like({
-                    "Statement": {
-                        "ManagedRuleGroupStatement": Match.object_like({
-                            "Name": "AWSManagedRulesCommonRuleSet",
-                            "VendorName": "AWS"
-                        })
-                    }
+                    "Name": Match.string_like_regexp(".*CommonRuleSet.*")
                 })
             ])
         })
 
-    def test_log_bucket_created_with_encryption_and_block(self):
-        self.template.has_resource_properties("AWS::S3::Bucket", {
-            "BucketEncryption": {
-                "ServerSideEncryptionConfiguration": Match.array_with([
-                    Match.object_like({
-                        "ServerSideEncryptionByDefault": {
-                            "SSEAlgorithm": "AES256"
-                        }
-                    })
-                ])
-            },
-            "PublicAccessBlockConfiguration": {
-                "BlockPublicAcls": True,
-                "IgnorePublicAcls": True,
-                "BlockPublicPolicy": True,
-                "RestrictPublicBuckets": True
-            }
-        })
-
-    def test_frontend_bucket_created(self):
-        self.template.has_resource("AWS::S3::Bucket", {
-            "Properties": {
-                "WebsiteConfiguration": {
-                    "IndexDocument": "index.html"
-                }
-            }
-        })
-
-    def test_react_frontend_distribution_created(self):
-        self.template.has_resource("AWS::CloudFront::Distribution", {})
-
-    def test_frontend_certificate_created(self):
-        self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
-            "DomainName": Match.string_like_regexp("^example.com$"),
-            "ValidationMethod": "DNS"
-        })
-
-    def test_cert_domains_and_cdn_aliases(self):
-        template = Template.from_stack(self.stack)
-
-        # Check CloudFront distribution uses expected alias
-        template.has_resource_properties("AWS::CloudFront::Distribution", {
-            "DistributionConfig": {
-                "Aliases": Match.array_with(["example.com"])
-            }
-        })
+    def test_log_group_created(self):
+        self.template.resource_count_is("AWS::Logs::LogGroup", 1)
 
     def test_no_dangerous_wildcard_iam_policies(self):
         resources = self.template.to_json().get("Resources", {})

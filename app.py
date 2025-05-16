@@ -13,7 +13,7 @@ from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 import argparse
 import json
 from pathlib import Path
-from galv_cdk.galv_stack import GalvBackend
+from galv_cdk.backend_stack import GalvBackend
 from galv_cdk.nag_supressions import suppress_nags_post_synth
 from utils import print_nag_findings
 
@@ -36,7 +36,7 @@ region = os.environ.get("CDK_DEFAULT_REGION")
 
 name = app.node.try_get_context("name") or "galv"
 
-frontend = GalvFrontend(app, f"{name}-FrontendWafStack", name=name, certificate_arn=context.get("certificate_arn", None))
+frontend = GalvFrontend(app, f"{name}-FrontendWafStack", certificate_arn=context.get("certificate_arn", None), env={"account": account, "region": region})
 
 # Instantiate the stack
 backend = GalvBackend(app, f"{name}-GalvStack", certificate_arn=context.get("certificate_arn", None), env={"account": account, "region": region})

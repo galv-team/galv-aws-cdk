@@ -11,7 +11,7 @@ from aws_cdk.assertions import Template, Match
 from constructs import IConstruct
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 
-from galv_cdk.galv_stack import GalvBackend
+from galv_cdk.backend_stack import GalvBackend
 
 
 class TestGalvBackend(unittest.TestCase):
@@ -164,7 +164,7 @@ class TestGalvBackend(unittest.TestCase):
         # Check logging is enabled
         logging = backend_bucket["Properties"].get("LoggingConfiguration", {})
         self.assertIn("DestinationBucketName", logging)
-        self.assertIn("BackendStorage-access-logs/", logging.get("LogFilePrefix"))
+        self.assertIn("BackendStorage-access-logs", logging.get("LogFilePrefix"))
 
         # Check public access block
         public_block = backend_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
@@ -472,6 +472,44 @@ class TestGalvBackend(unittest.TestCase):
             "DomainName": "api.example.com",
             "ValidationMethod": "DNS"
         })
+
+    def test_setup_task_cr_has_passrole_permission(self):
+        resources = self.template.to_json().get("Resources", {})
+
+        # Find the logical ID of the setup task role
+        task_role_logical_id = None
+        for name, res in resources.items():
+            if res["Type"] == "AWS::IAM::Role" and "SetupDbTaskDefTaskRole" in name:
+                task_role_logical_id = name
+                break
+
+        self.assertIsNotNone(task_role_logical_id, "Could not find setup task IAM role")
+
+        # Search for iam:PassRole on that exact logical ID via Fn::GetAtt
+        found = False
+        for res in resources.values():
+            if res["Type"] != "AWS::IAM::Policy":
+                continue
+            statements = res.get("Properties", {}).get("PolicyDocument", {}).get("Statement", [])
+            for stmt in statements:
+                actions = stmt.get("Action", [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "iam:PassRole" not in actions:
+                    continue
+
+                resource_entries = stmt.get("Resource", [])
+                if not isinstance(resource_entries, list):
+                    resource_entries = [resource_entries]
+
+                for r in resource_entries:
+                    try:
+                        if isinstance(r, dict) and r.get("Fn::GetAtt", [])[0] == task_role_logical_id:
+                            found = True
+                    except IndexError:
+                        pass
+
+        self.assertTrue(found, f"iam:PassRole not granted on setup task role ({task_role_logical_id})")
 
     def test_no_dangerous_wildcard_iam_policies(self):
         resources = self.template.to_json().get("Resources", {})

@@ -1,6 +1,7 @@
 from typing import Union
 
 from aws_cdk import Stack
+from aws_cdk.aws_elasticloadbalancingv2 import CfnListener
 from cdk_nag import NagSuppressions
 
 
@@ -18,7 +19,6 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_frontend(stack, name)
         _suppress_backend_taskrole_policy(stack, name)
         _suppress_vpc_endpoints(stack, name)
-        _suppress_frontend_bucket_policy(stack, name)
         _suppress_log_bucket(stack, name)
         _suppress_backend_bucket(stack, name)
         _suppress_backend_iams(stack, name)
@@ -26,11 +26,8 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_ecs_env_vars(stack, name)
         _suppress_inline_iam_policies(stack, name)
         _suppress_ecs_iam5_wildcards(stack, name)
-        _suppress_codebuild_kms(stack, name)
         _suppress_log_bucket_pre(stack, name)
         _suppress_vpc_routes_pre(stack, name)
-        _suppress_frontend_bucket(stack, name)
-        _suppress_frontend_iam(stack, name)
         _suppress_lambda_iam4(stack)
         _suppress_backend_alb_sg(stack, name)
         _suppress_db_sg_validation_failures(stack, name)
@@ -38,7 +35,7 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_rds_nags(stack, name)
         _suppress_alb_attributes(stack, name)
         _suppress_lambda_resource(stack)
-        _suppress_waf(stack, name)
+        _suppress_frontend(stack, name)
     except Exception as e:
         raise InapplicableSuppressionError("Failed to apply pre-synth suppressions") from e
 
@@ -64,20 +61,6 @@ def _suppress_cert_stack(stack: Stack):
         is_route53_domain = stack.node.try_get_context("isRoute53Domain")
         if is_route53_domain is False:
             raise InapplicableSuppressionError("Certificate not found") from e
-
-
-def _suppress_frontend(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvFrontend":
-        return
-    frontend = stack
-    cdn = frontend.node.find_child(f"{name}-FrontendCDN")
-    NagSuppressions.add_resource_suppressions(
-        cdn.node.default_child,
-        [{
-            "id": "AwsSolutions-CFR1",
-            "reason": "Geo restrictions are not required for this public static site."
-        }]
-    )
 
 
 def _suppress_backend_taskrole_policy(stack: Stack, name: str):
@@ -129,31 +112,7 @@ def _suppress_vpc_endpoints(stack: Stack, name: str):
     )
 
 
-def _suppress_frontend_bucket_policy(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvFrontend":
-        return
-    frontend = stack
-    bucket = frontend.node.find_child(f"{name}-FrontendBucket")
-    policy = bucket.policy
-
-    NagSuppressions.add_resource_suppressions(
-        policy,
-        [
-            {
-                "id": "AwsSolutions-S10",
-                "reason": "The bucket enforces SSL via a deny policy on non-SecureTransport requests."
-            },
-            {
-                "id": "HIPAA.Security-S3BucketSSLRequestsOnly",
-                "reason": "The bucket enforces SSL via a deny policy on non-SecureTransport requests."
-            }
-        ]
-    )
-
-
 def _suppress_log_bucket(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvBackend":
-        return
     bucket = stack.node.find_child(f"{name}-LogBucket")
     NagSuppressions.add_resource_suppressions(
         bucket,
@@ -164,11 +123,13 @@ def _suppress_log_bucket(stack: Stack, name: str):
             }
         ]
     )
+    NagSuppressions.add_resource_suppressions(
+        bucket,
+        [{"id": "AwsSolutions-S1", "reason": "Log bucket is not itself logged to avoid circular logging"}]
+    )
 
 
 def _suppress_log_bucket_pre(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvBackend":
-        return
     bucket = stack.node.find_child(f"{name}-LogBucket")
     NagSuppressions.add_resource_suppressions(
         bucket,
@@ -302,108 +263,6 @@ def _suppress_backend_iams(stack: Stack, name: str):
                     }
                 ]
             )
-
-
-def _suppress_frontend_iam(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvFrontend":
-        return
-    frontend = stack
-    build = frontend.node.find_child(f"{name}-FrontendBuild")
-    role = build.role
-    default_policy = role.node.find_child("DefaultPolicy")
-
-    frontend_bucket = frontend.node.find_child(f"{name}-FrontendBucket")
-    frontend_bucket_logical_id = stack.get_logical_id(frontend_bucket.node.default_child)
-
-    partition = "aws"  # fine unless using multiple partitions (e.g. AWS GovCloud or China).
-    region = stack.region
-    account = stack.account
-
-    applies_to = [
-        "Action::s3:GetObject*",
-        "Action::s3:GetBucket*",
-        "Action::s3:List*",
-        "Action::s3:DeleteObject*",
-        "Action::s3:Abort*",
-        f"Resource::<{frontend_bucket_logical_id}.Arn>/*",
-        "Action::ec2:CreateNetworkInterface",
-        "Action::ec2:DeleteNetworkInterface",
-        "Action::ec2:DescribeNetworkInterfaces",
-        f"Resource::arn:{partition}:ec2:{region}:{account}:network-interface/*",
-        f"Resource::arn:{partition}:logs:{region}:{account}:log-group:/aws/codebuild/{stack.get_logical_id(build.node.default_child)}:*",
-        f"Resource::arn:{partition}:codebuild:{region}:{account}:report-group/{stack.get_logical_id(build.node.default_child)}-*",
-    ]
-
-    # Suppress wildcard IAM permissions
-    NagSuppressions.add_resource_suppressions(
-        default_policy.node.default_child,
-        suppressions=[
-            {
-                "id": "AwsSolutions-IAM5",
-                "reason": "CodeBuild requires wildcard access for artifacts, logs, network interfaces, and dynamic infrastructure",
-                "appliesTo": applies_to
-            },
-            {
-                "id": "HIPAA.Security-IAMNoInlinePolicy",
-                "reason": "CodeBuild role uses inline policy generated by CDK with tightly scoped permissions"
-            }
-        ]
-    )
-
-    # Nag does not evaluate the resource ARN correctly, so we need to add a wildcard suppression
-    NagSuppressions.add_resource_suppressions(
-        default_policy.node.default_child,
-        suppressions=[
-            {
-                "id": "AwsSolutions-IAM5",
-                "reason": "Parent rule suppression for wildcard actions required by CodeBuild"
-            }
-        ]
-    )
-
-    NagSuppressions.add_resource_suppressions(
-        build.node.default_child,
-        [{
-            "id": "HIPAA.Security-CodeBuildProjectSourceRepoUrl",
-            "reason": "Public GitHub repo does not require OAuth; access is read-only and verified by branch ref"
-        }]
-    )
-
-
-def _suppress_frontend_bucket(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvFrontend":
-        return
-    frontend = stack
-    bucket = frontend.node.find_child(f"{name}-FrontendBucket")
-
-    # Suppress on the bucket itself for versioning/replication/KMS
-    NagSuppressions.add_resource_suppressions(
-        bucket,
-        suppressions=[
-            {
-                "id": "HIPAA.Security-S3BucketReplicationEnabled",
-                "reason": "Replication is not required for frontend static assets"
-            },
-            {
-                "id": "HIPAA.Security-S3BucketVersioningEnabled",
-                "reason": "Versioning is not required for static site bucket"
-            },
-            {
-                "id": "HIPAA.Security-S3DefaultEncryptionKMS",
-                "reason": "S3-managed encryption is sufficient for public static assets"
-            }
-        ],
-        apply_to_children=True
-    )
-    # Suppress S5 on the bucket policy *resource*
-    NagSuppressions.add_resource_suppressions(
-        bucket.node.default_child,
-        suppressions=[{
-            "id": "AwsSolutions-S5",
-            "reason": "Access restricted via CloudFront Origin Access Control and deny non-SecureTransport policy"
-        }],
-        apply_to_children=True
-    )
 
 
 def _suppress_vpc_routes_pre(stack: Stack, name: str):
@@ -552,6 +411,25 @@ def _suppress_inline_iam_policies(stack: Stack, name: str):
         [{"id": "HIPAA.Security-IAMNoInlinePolicy", "reason": reason}]
     )
 
+    exec_roles = [
+        stack.node.find_child(f"{name}-BackendService").task_definition.execution_role.node.find_child("DefaultPolicy"),
+        stack.node.find_child(f"{name}-SetupDbTaskDef").execution_role.node.find_child("DefaultPolicy"),
+        stack.node.find_child(f"{name}-ValidationMonitorTaskDef").execution_role.node.find_child("DefaultPolicy"),
+    ]
+
+    for policy in exec_roles:
+        if policy and policy.node.default_child:
+            NagSuppressions.add_resource_suppressions(
+                policy.node.default_child,
+                suppressions=[
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": "CDK ECS execution roles include wildcard access to support ECR image pulls and CloudWatch log groups",
+                        "appliesTo": ["Resource::*"]
+                    }
+                ]
+            )
+
 
 def _suppress_ecs_iam5_wildcards(stack: Stack, name: str):
     if stack.__class__.__name__ != "GalvBackend":
@@ -586,22 +464,6 @@ def _suppress_ecs_iam5_wildcards(stack: Stack, name: str):
                 }
             ]
         )
-
-
-def _suppress_codebuild_kms(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvFrontend":
-        return
-    frontend = stack
-    build = frontend.node.find_child(f"{name}-FrontendBuild")
-    l1 = build.node.default_child  # <- This is the real target CDK Nag evaluates for suppressions
-
-    NagSuppressions.add_resource_suppressions(
-        l1,
-        suppressions=[{
-            "id": "AwsSolutions-CB4",
-            "reason": "Build logs do not contain sensitive information and are stored in a private bucket using S3-managed encryption."
-        }]
-    )
 
 
 def _suppress_lambda_iam4(stack: Stack):
@@ -748,7 +610,18 @@ def _suppress_alb_attributes(stack: Stack, name: str):
             }
         ]
     )
-
+    for node in stack.node.find_all():
+        if isinstance(node, CfnListener):
+            if node.port == 80:  # this is the HTTP → HTTPS redirect listener
+                NagSuppressions.add_resource_suppressions(
+                    node,
+                    [
+                        {
+                            "id": "HIPAA.Security-ELBv2ACMCertificateRequired",
+                            "reason": "HTTP listener is used only to redirect to HTTPS; no ACM cert required"
+                        }
+                    ]
+                )
 
 def _suppress_lambda_resource(stack: Stack):
     if stack.__class__.__name__ != "GalvBackend":
@@ -777,24 +650,34 @@ def _suppress_lambda_resource(stack: Stack):
     )
 
 
-def _suppress_waf(stack: Stack, name: str):
-    """
-    Suppress WAF-related CDK Nag warnings.
-    """
+def _suppress_frontend(stack: Stack, name: str):
     if stack.__class__.__name__ != "GalvFrontend":
         return
-    frontend = stack
-    cdn = frontend.node.find_child(f"{name}-FrontendCDN")
+
+    service = stack.node.find_child(f"{name}-FrontendService")
+    alb = service.load_balancer.node.default_child
+
+    from cdk_nag import NagSuppressions
     NagSuppressions.add_resource_suppressions(
-        cdn.node.default_child,
+        alb,
         [
             {
-                "id": "AwsSolutions-CFR2",
-                "reason": "CloudFront distribution is protected by WAF when enabled; suppression applied during dev or where WAF is not needed."
+                "id": "HIPAA.Security-ALBHttpDropInvalidHeaderEnabled",
+                "reason": "Header dropping is explicitly enabled"
             },
             {
-                "id": "HIPAA.Security-WAFv2LoggingEnabled",
-                "reason": "Logging is not required for this WAF; access is controlled via CloudFront"
+                "id": "HIPAA.Security-ELBDeletionProtectionEnabled",
+                "reason": "Enabled via ALB override based on isProduction"
+            }
+        ]
+    )
+
+    NagSuppressions.add_resource_suppressions(
+        service.task_definition,
+        [
+            {
+                "id": "AwsSolutions-ECS2",
+                "reason": "Frontend does not handle secrets in env; only public config"
             }
         ]
     )

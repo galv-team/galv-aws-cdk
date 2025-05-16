@@ -2,6 +2,7 @@ import json
 
 from aws_cdk import (
     aws_ec2 as ec2,
+    aws_ecr as ecr,
     aws_ecs as ecs,
     aws_ecs_patterns as ecs_patterns,
     aws_s3 as s3,
@@ -119,7 +120,8 @@ class GalvBackend(Stack):
             f"{self.name}-LogBucket",
             encryption=s3.BucketEncryption.S3_MANAGED,
             removal_policy=RemovalPolicy.DESTROY,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            auto_delete_objects=not self.is_production,
         )
 
         self.log_bucket.add_to_resource_policy(
@@ -236,7 +238,7 @@ class GalvBackend(Stack):
             encryption_key=self.kms_key,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             server_access_logs_bucket=self.log_bucket,
-            server_access_logs_prefix=f"{self.name}-BackendStorage-access-logs/"
+            server_access_logs_prefix=f"{self.name}-BackendStorage-access-logs"
         )
         self.bucket.add_to_resource_policy(
             iam.PolicyStatement(
@@ -404,6 +406,12 @@ class GalvBackend(Stack):
         )
         web_log_group.node.add_dependency(self.kms_key)
 
+        self.repo = ecr.Repository.from_repository_name(
+            self,
+            f"{self.name}-BackendRepo",
+            repository_name="galv-backend"
+        )
+
         self.service = ecs_patterns.ApplicationLoadBalancedFargateService(
             self,
             f"{self.name}-BackendService",
@@ -413,8 +421,9 @@ class GalvBackend(Stack):
             desired_count=1,
             min_healthy_percent=100,
             task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                image=ecs.ContainerImage.from_registry(
-                    f"ghcr.io/galv-team/galv-backend:{self.backend_version}"
+                image=ecs.ContainerImage.from_ecr_repository(
+                    repository=self.repo,
+                    tag=self.backend_version
                 ),
                 container_port=8000,
                 environment={
@@ -434,8 +443,11 @@ class GalvBackend(Stack):
             security_groups=[self.alb_sg],
             task_subnets=ec2.SubnetSelection(subnet_group_name="private"),
             certificate=self.certificate,
-            protocol=elbv2.ApplicationProtocol.HTTPS,
+            domain_name=self.fqdn,
+            domain_zone=route53.HostedZone.from_lookup(self, "Zone", domain_name=self.domain_name),
+            redirect_http=True,
         )
+
 
         self.bucket.grant_read_write(self.service.task_definition.task_role)
 
@@ -482,7 +494,10 @@ class GalvBackend(Stack):
 
         self.setup_task_def.add_container(
             f"{self.name}-SetupDbContainer",
-            image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
+            image=ecs.ContainerImage.from_ecr_repository(
+                repository=self.repo,
+                tag=self.backend_version
+            ),
             command=["/code/setup_db.sh"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="setup-db",
@@ -516,9 +531,17 @@ class GalvBackend(Stack):
                 },
                 physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunSetupTask")
             ),
-            policy=AwsCustomResourcePolicy.from_sdk_calls(
-                resources=AwsCustomResourcePolicy.ANY_RESOURCE
-            ),
+            policy=AwsCustomResourcePolicy.from_statements([
+                iam.PolicyStatement(
+                    actions=["ecs:RunTask", "iam:PassRole"],
+                    resources=[
+                        self.setup_task_def.task_definition_arn,
+                        f"arn:aws:ecs:{self.region}:{self.account}:cluster/{self.cluster.cluster_name}",
+                        self.setup_task_def.task_role.role_arn,
+                        self.setup_task_def.execution_role.role_arn,
+                    ]
+                )
+            ]),
             install_latest_aws_sdk=False,
         )
 
@@ -556,7 +579,10 @@ class GalvBackend(Stack):
 
         self.monitor_task_def.add_container(
             f"{self.name}-ValidationMonitorContainer",
-            image=ecs.ContainerImage.from_registry(f"ghcr.io/galv-team/galv-backend:{self.backend_version}"),
+            image=ecs.ContainerImage.from_ecr_repository(
+                repository=self.repo,
+                tag=self.backend_version
+            ),
             command=["python", "manage.py", "validation_monitor"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix=f"{self.name}-ValidationMonitor",
@@ -594,7 +620,7 @@ class GalvBackend(Stack):
         if not Token.is_unresolved(region):
             self.service.load_balancer.log_access_logs(
                 bucket=self.log_bucket,
-                prefix=f"{self.name}-BackendService-ALB-logs/"
+                prefix=f"{self.name}-BackendService-ALB-logs"
             )
 
         # Secure the ALB after its other settings are complete
