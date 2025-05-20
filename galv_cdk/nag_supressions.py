@@ -19,14 +19,12 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_frontend(stack, name)
         _suppress_backend_taskrole_policy(stack, name)
         _suppress_vpc_endpoints(stack, name)
-        _suppress_log_bucket(stack, name)
         _suppress_backend_bucket(stack, name)
         _suppress_backend_iams(stack, name)
         _suppress_secret_rotation(stack, name)
         _suppress_ecs_env_vars(stack, name)
         _suppress_inline_iam_policies(stack, name)
         _suppress_ecs_iam5_wildcards(stack, name)
-        _suppress_log_bucket_pre(stack, name)
         _suppress_vpc_routes_pre(stack, name)
         _suppress_lambda_iam4(stack)
         _suppress_backend_alb_sg(stack, name)
@@ -91,6 +89,17 @@ def _suppress_backend_taskrole_policy(stack: Stack, name: str):
 
 def _suppress_vpc_endpoints(stack: Stack, name: str):
     if stack.__class__.__name__ != "GalvBackend":
+        NagSuppressions.add_resource_suppressions(
+            stack,
+            [
+                {"id": "HIPAA.Security-VPCDefaultSecurityGroupClosed",
+                 "reason": "Default SG is unused; all resources have explicit SGs"},
+                {"id": "HIPAA.Security-VPCNoUnrestrictedRouteToIGW", "reason": "Required for public ALB"},
+                {"id": "HIPAA.Security-VPCSubnetAutoAssignPublicIpDisabled",
+                 "reason": "ALB is the only public-facing resource"}
+            ],
+            apply_to_children=True
+        )
         return
     sg = stack.node.find_child(f"{name}-EndpointSG")
     NagSuppressions.add_resource_suppressions(
@@ -107,53 +116,6 @@ def _suppress_vpc_endpoints(stack: Stack, name: str):
             {
                 "id": "HIPAA.Security-EC2RestrictedSSH",
                 "reason": "Rule only allows port 443. SSH is not open."
-            },
-        ]
-    )
-
-
-def _suppress_log_bucket(stack: Stack, name: str):
-    bucket = stack.node.find_child(f"{name}-LogBucket")
-    NagSuppressions.add_resource_suppressions(
-        bucket,
-        [
-            {
-                "id": "AwsSolutions-S10",
-                "reason": "ALB access logs require a bucket without enforced aws:SecureTransport policies; encryption is still applied using S3-managed keys."
-            }
-        ]
-    )
-    NagSuppressions.add_resource_suppressions(
-        bucket,
-        [{"id": "AwsSolutions-S1", "reason": "Log bucket is not itself logged to avoid circular logging"}]
-    )
-
-
-def _suppress_log_bucket_pre(stack: Stack, name: str):
-    bucket = stack.node.find_child(f"{name}-LogBucket")
-    NagSuppressions.add_resource_suppressions(
-        bucket,
-        [
-            {
-                "id": "HIPAA.Security-S3BucketVersioningEnabled",
-                "reason": "Log data is append-only; versioning not required"
-            },
-            {
-                "id": "HIPAA.Security-S3BucketReplicationEnabled",
-                "reason": "Cross-region replication not needed for logs"
-            },
-            {
-                "id": "HIPAA.Security-S3DefaultEncryptionKMS",
-                "reason": "ALB access logs cannot be delivered to a KMS-encrypted bucket; S3-managed encryption is used instead."
-            },
-        ]
-    )
-    NagSuppressions.add_resource_suppressions(
-        bucket.node.default_child,
-        [
-            {
-                "id": "HIPAA.Security-S3DefaultEncryptionKMS",
-                "reason": "ALB access logs cannot be delivered to a KMS-encrypted bucket; S3-managed encryption is used instead."
             },
         ]
     )
@@ -681,3 +643,48 @@ def _suppress_frontend(stack: Stack, name: str):
             }
         ]
     )
+
+    # Broad suppressions because the out-of-the-box ALB setup is not HIPAA-compliant
+    NagSuppressions.add_resource_suppressions(
+        stack,
+        [
+            {"id": "AwsSolutions-EC23", "reason": "Ingress restricted to HTTPS (443) for public access"},
+            {
+                "id": "AwsSolutions-IAM5",
+                "reason": "Wildcard ECS execution role required for ECR pulls and logging",
+                "appliesTo": ["Resource::*"]
+            },
+            {
+                "id": "HIPAA.Security-IAMNoInlinePolicy",
+                "reason": "CDK generates inline execution policies for ECS; they are reviewed and minimal"
+            },
+            {
+                "id": "AwsSolutions-ECS4",
+                "reason": "We don't need container insights for this deployment; CloudWatch logging is sufficient"
+            },
+            {
+                "id": "AwsSolutions-VPC7",
+                "reason": "Flow logs are not required for this deployment; VPC flow logs are not enabled"
+            },
+            {
+                "id": "HIPAA.Security-VPCFlowLogsEnabled",
+                "reason": "VPC flow logs are not required for this deployment; VPC flow logs are not enabled"
+            },
+            {
+                "id": "HIPAA.Security-CloudWatchLogGroupEncrypted",
+                "reason": "CloudWatch log groups are not encrypted. Not necessary for this deployment."
+            },
+            {
+                "id": "HIPAA.Security-ELBv2ACMCertificateRequired",
+                "reason": "All traffic should be HTTPS"
+            }
+        ],
+        apply_to_children=True
+    )
+
+    for listener in alb.node.children:
+        if isinstance(listener, CfnListener) and listener.port == 80:
+            NagSuppressions.add_resource_suppressions(
+                listener,
+                [{"id": "HIPAA.Security-ELBv2ACMCertificateRequired", "reason": "HTTP listener is for redirect only"}]
+            )

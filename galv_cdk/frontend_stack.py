@@ -8,14 +8,15 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_logs as logs,
     aws_iam as iam,
-    aws_s3 as s3, RemovalPolicy,
+    aws_s3 as s3,
 )
+from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from constructs import Construct
 from nag_supressions import suppress_nags_pre_synth
 from utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
 
 class GalvFrontend(Stack):
-    def __init__(self, scope: Construct, id: str, certificate_arn: str = None, **kwargs) -> None:
+    def __init__(self, scope: Construct, id: str, log_bucket: s3.IBucket, certificate_arn: str = None, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
         self.name = self.node.try_get_context("name") or "galv"
@@ -26,30 +27,21 @@ class GalvFrontend(Stack):
         self.fqdn = f"{self.subdomain}.{self.domain_name}".lstrip(".")
         self.is_route53_domain = self.node.try_get_context("isRoute53Domain") or False
         self.frontend_version = self.node.try_get_context("frontendVersion") or "latest"
+        self.log_bucket = log_bucket
 
-        self._create_log_bucket()
+        self._update_log_bucket_access()
         self._create_cert(certificate_arn)
-        self._create_vpc()
         self._create_cluster()
         self._create_service()
 
         suppress_nags_pre_synth(self)
 
-    def _create_log_bucket(self):
+    def _update_log_bucket_access(self):
         """
         Create an S3 Bucket for storing logs.
         Some logs are stored in the bucket, and some are sent to CloudWatch, because not all logs can be sent to S3.
         :return:
         """
-        # ==== Log Bucket ====
-        self.log_bucket = s3.Bucket(
-            self,
-            f"{self.name}-LogBucket",
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.DESTROY,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            auto_delete_objects=not self.is_production,
-        )
 
         self.log_bucket.add_to_resource_policy(
             iam.PolicyStatement(
@@ -82,40 +74,25 @@ class GalvFrontend(Stack):
         )
 
     def _create_cert(self, certificate_arn: str):
-        if certificate_arn:
-            self.certificate = acm.Certificate.from_certificate_arn(
-                self, "FrontendCertificate", certificate_arn
-            )
-        elif self.is_route53_domain:
-            zone = route53.HostedZone.from_lookup(self, "FrontendZone", domain_name=self.domain_name)
+        if certificate_arn is None and not self.is_route53_domain:
+            raise ValueError(get_aws_custom_cert_instructions(self.fqdn))
+
+        if self.is_route53_domain:
+            zone = route53.HostedZone.from_lookup(self, f"{self.name}-FrontendZone", domain_name=self.domain_name)
             self.certificate = acm.Certificate(
                 self,
-                "FrontendCertificate",
+                f"{self.name}-FrontendCertificate",
                 domain_name=self.fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )
         else:
-            raise ValueError(get_aws_custom_cert_instructions(self.fqdn))
-
-    def _create_vpc(self):
-        self.vpc = ec2.Vpc(
-            self,
-            f"{self.name}-FrontendVpc",
-            max_azs=2,
-            nat_gateways=0,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC),
-                ec2.SubnetConfiguration(name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            ],
-            flow_logs={
-                "AllTraffic": ec2.FlowLogOptions(
-                    destination=ec2.FlowLogDestination.to_s3(self.log_bucket)
-                )
-            }
-        )
+            print(f"Using existing certificate: {certificate_arn}")
+            self.certificate = acm.Certificate.from_certificate_arn(
+                self, f"{self.name}-FrontendCertificate", certificate_arn
+            )
 
     def _create_cluster(self):
-        self.cluster = ecs.Cluster(self, f"{self.name}-FrontendCluster", vpc=self.vpc)
+        self.cluster = ecs.Cluster(self, f"{self.name}-FrontendCluster")
 
     def _create_service(self):
         web_acl = create_waf_scope_web_acl(
@@ -141,6 +118,8 @@ class GalvFrontend(Stack):
             cpu=256,
             memory_limit_mib=512,
             desired_count=1,
+            min_healthy_percent=50,
+            max_healthy_percent=200,
             public_load_balancer=True,
             certificate=self.certificate,
             domain_name=self.fqdn,
@@ -156,17 +135,24 @@ class GalvFrontend(Stack):
                     stream_prefix="galv-frontend",
                     log_group=log_group,
                 ),
-            ),
+            )
+        )
+
+        service.load_balancer.log_access_logs(
+            bucket=self.log_bucket,
+            prefix="Frontend-ALB-logs"
         )
 
         # Attach WAF to ALB
         alb = service.load_balancer.node.default_child
-        alb.add_property_override(
-            "WebACLId", web_acl.ref
+        CfnWebACLAssociation(
+            self,
+            f"{self.name}-FrontendWafAssociation",
+            resource_arn=service.load_balancer.load_balancer_arn,
+            web_acl_arn=web_acl.attr_arn,
         )
-
         # Secure ALB headers + optional output
-        alb.add_property_override("LoadBalancerAttributes", [
+        alb.add_override("Properties.LoadBalancerAttributes", [
             {"Key": "routing.http.drop_invalid_header_fields.enabled", "Value": "true"},
             {"Key": "deletion_protection.enabled", "Value": str(self.is_production).lower()}
         ])

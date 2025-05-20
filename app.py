@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Horrible Hack to support NVM
 import os
+
+from log_bucket_stack import LogBucketStack
 from tests.unit import _nvm_hack
 
 _nvm_hack.hack_nvm_path()
@@ -8,8 +10,8 @@ _nvm_hack.hack_nvm_path()
 
 from frontend_stack import GalvFrontend
 
-from aws_cdk import App, Aspects
-from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
+from aws_cdk import App, Aspects, RemovalPolicy, aws_s3 as s3
+from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks, NagSuppressions
 import argparse
 import json
 from pathlib import Path
@@ -29,19 +31,41 @@ else:
     context_path = Path("cdk.json")
 context = json.loads(context_path.read_text())["context"]
 
-app = App(context=context)
-
 account = os.environ.get("CDK_DEFAULT_ACCOUNT")
 region = os.environ.get("CDK_DEFAULT_REGION")
 
-name = app.node.try_get_context("name") or "galv"
+app = App(context=context)
 
-frontend = GalvFrontend(app, f"{name}-FrontendWafStack", certificate_arn=context.get("certificate_arn", None), env={"account": account, "region": region})
+name = app.node.try_get_context("name") or "galv"
+is_production = app.node.try_get_context("isProduction")
+if is_production is None:
+    is_production = True
+
+log_bucket_stack = LogBucketStack(
+    app,
+    f"{name}-LBStack",
+    name=name,
+    is_production=is_production,
+    env={"account": account, "region": region},
+)
+
+frontend = GalvFrontend(
+    app,
+    f"{name}-FrontendWafStack",
+    log_bucket=log_bucket_stack.log_bucket,
+    certificate_arn=context.get("certificate_arn", None),
+    env={"account": account, "region": region},
+)
 
 # Instantiate the stack
-backend = GalvBackend(app, f"{name}-GalvStack", certificate_arn=context.get("certificate_arn", None), env={"account": account, "region": region})
+backend = GalvBackend(
+    app,
+    f"{name}-GalvStack",
+    log_bucket=log_bucket_stack.log_bucket,
+    certificate_arn=context.get("certificate_arn", None),
+    env={"account": account, "region": region},
+)
 
-# Add CDK Nag rules
 Aspects.of(app).add(AwsSolutionsChecks(verbose=True))
 Aspects.of(app).add(HIPAASecurityChecks())
 

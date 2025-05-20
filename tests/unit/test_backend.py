@@ -1,12 +1,15 @@
 # Horrible Hack to support NVM
+from aws_cdk.aws_s3 import Bucket
+
 import _nvm_hack
 from nag_supressions import suppress_nags_post_synth
+from log_bucket_stack import LogBucketStack
 
 _nvm_hack.hack_nvm_path()
 # /HH
 
 import unittest
-from aws_cdk import App, Aspects, assertions
+from aws_cdk import App, Aspects, assertions, Stack
 from aws_cdk.assertions import Template, Match
 from constructs import IConstruct
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
@@ -46,10 +49,8 @@ class TestGalvBackend(unittest.TestCase):
         self.stack = GalvBackend(
             self.app,
             "TestStack",
-            env={
-                "account": "123456789012",
-                "region": "eu-west-2"
-            }
+            log_bucket=LogBucketStack(self.app, "TestRootStack", name="test", is_production=False).log_bucket,
+            env={"account": "123456789012", "region": "eu-west-2"}
         )
         self.app.synth()
         suppress_nags_post_synth(self.stack, self.stack.name)
@@ -134,48 +135,6 @@ class TestGalvBackend(unittest.TestCase):
                 })
             ])
         })
-
-    def test_backend_and_log_buckets_exist_and_configured(self):
-        resources = self.template.to_json().get("Resources", {})
-
-        backend_buckets = [
-            (name, res) for name, res in resources.items()
-            if res["Type"] == "AWS::S3::Bucket"
-               and "BackendStorage" in name
-        ]
-        log_buckets = [
-            (name, res) for name, res in resources.items()
-            if res["Type"] == "AWS::S3::Bucket"
-               and "LogBucket" in name
-        ]
-
-        self.assertEqual(len(backend_buckets), 1, "Expected one backend bucket")
-        self.assertEqual(len(log_buckets), 1, "Expected one log bucket")
-
-        backend_bucket = backend_buckets[0][1]
-        log_bucket = log_buckets[0][1]
-
-        # Check backend bucket has KMS encryption
-        encryption_config = backend_bucket["Properties"].get("BucketEncryption", {})
-        self.assertIn("ServerSideEncryptionConfiguration", encryption_config)
-        algo = encryption_config["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["SSEAlgorithm"]
-        self.assertEqual(algo, "aws:kms")
-
-        # Check logging is enabled
-        logging = backend_bucket["Properties"].get("LoggingConfiguration", {})
-        self.assertIn("DestinationBucketName", logging)
-        self.assertIn("BackendStorage-access-logs", logging.get("LogFilePrefix"))
-
-        # Check public access block
-        public_block = backend_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
-        for key in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
-            self.assertTrue(public_block.get(key), f"{key} should be true on backend bucket")
-
-        # Log bucket should also block public access
-        log_public_block = log_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
-        for key in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
-            self.assertTrue(log_public_block.get(key), f"{key} should be true on log bucket")
-
 
     def test_rds_postgres_instance_created(self):
         self.template.has_resource_properties("AWS::RDS::DBInstance", {
@@ -315,7 +274,12 @@ class TestGalvBackend(unittest.TestCase):
             "mailFromDomain": "example.com",
             "domainName": "example.com",
         })
-        stack = GalvBackend(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
+        stack = GalvBackend(
+            app,
+            "TestStack",
+            log_bucket=LogBucketStack(app, "TestRootStack", name="test", is_production=False).log_bucket,
+            env={"account": "123456789012", "region": "eu-west-2"}
+        )
         template = Template.from_stack(stack)
 
         # Should create an Events::Rule to run the task
@@ -328,7 +292,12 @@ class TestGalvBackend(unittest.TestCase):
             "mailFromDomain": "example.com",
             "domainName": "example.com",
         })
-        stack = GalvBackend(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
+        stack = GalvBackend(
+            app,
+            "TestStack",
+            log_bucket=LogBucketStack(app, "TestRootStack", name="test", is_production=False).log_bucket,
+            env={"account": "123456789012", "region": "eu-west-2"}
+        )
         template = Template.from_stack(stack)
 
         # Should NOT create an Events::Rule

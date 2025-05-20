@@ -14,12 +14,12 @@ from aws_cdk import (
     aws_iam as iam,
     aws_kms as kms,
     aws_logs as logs,
-    aws_elasticloadbalancingv2 as elbv2,
     aws_route53 as route53,
     aws_route53_targets as route53_targets,
     aws_certificatemanager as acm,
     Stack, CfnOutput, Duration, Token, Tags
 )
+from aws_cdk.aws_s3 import IBucket
 from aws_cdk.custom_resources import AwsCustomResource, AwsSdkCall, PhysicalResourceId, AwsCustomResourcePolicy
 from cdk_nag import NagSuppressions
 from constructs import Construct
@@ -29,7 +29,7 @@ from utils import get_aws_custom_cert_instructions, inject_protected_env, create
 
 
 class GalvBackend(Stack):
-    def __init__(self, scope: Construct, construct_id: str, certificate_arn: str = None, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, log_bucket: IBucket, certificate_arn: str = None, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         project_tag = self.node.try_get_context("projectNameTag") or "galv"
@@ -51,6 +51,7 @@ class GalvBackend(Stack):
         self.secrets = {}
 
         self.stack = Stack.of(self)
+        self.log_bucket = log_bucket
 
         self.log_retention = logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY
 
@@ -73,7 +74,7 @@ class GalvBackend(Stack):
         self.backend_version = self.node.try_get_context("backendVersion") or "latest"
 
         self._create_domain_certificates()
-        self._create_log_bucket()
+        self._update_log_bucket_access()
         self._create_vpc()
 
         self._create_security_groups()
@@ -105,25 +106,16 @@ class GalvBackend(Stack):
                 validation=acm.CertificateValidation.from_dns(zone),
             )
         else:
-            self.certificate = acm.Certificate.from_certificate_arn(self, f"{self.name}-FrontendCertificate",
+            print(f"Using existing certificate: {self.certificate_arn}")
+            self.certificate = acm.Certificate.from_certificate_arn(self, f"{self.name}-BackendCertificate",
                                                                     self.certificate_arn)
 
-    def _create_log_bucket(self):
+    def _update_log_bucket_access(self):
         """
         Create an S3 Bucket for storing logs.
         Some logs are stored in the bucket, and some are sent to CloudWatch, because not all logs can be sent to S3.
         :return:
         """
-        # ==== Log Bucket ====
-        self.log_bucket = s3.Bucket(
-            self,
-            f"{self.name}-LogBucket",
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.DESTROY,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            auto_delete_objects=not self.is_production,
-        )
-
         self.log_bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 actions=["s3:*"],

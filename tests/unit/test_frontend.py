@@ -1,16 +1,18 @@
 # Horrible Hack to support NVM
+from aws_cdk.aws_s3 import Bucket
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 from constructs import IConstruct
 
 import _nvm_hack
 from frontend_stack import GalvFrontend
 from nag_supressions import suppress_nags_post_synth
+from log_bucket_stack import LogBucketStack
 
 _nvm_hack.hack_nvm_path()
 # /HH
 
 import unittest
-from aws_cdk import App, Aspects
+from aws_cdk import App, Aspects, Stack
 from aws_cdk.assertions import Match, Template
 
 
@@ -46,6 +48,7 @@ class TestGalvFrontend(unittest.TestCase):
         self.stack = GalvFrontend(
             self.app,
             "TestStack",
+            log_bucket=LogBucketStack(self.app, "TestRootStack", name="test", is_production=False).log_bucket,
             env={
                 "account": "123456789012",
                 "region": "eu-west-2"

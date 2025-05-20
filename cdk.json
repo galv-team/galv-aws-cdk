@@ -20,8 +20,8 @@
     "backendSecretsName": "galv-backend-secrets",
     "backendSecretsKeys": [],
     "monitorIntervalMinutes": 5,
-    "frontendSubdomain": "galv-test-app",
-    "backendSubdomain": "galv-test-api",
+    "frontendSubdomain": "galv-app-test",
+    "backendSubdomain": "galv-api-test",
     "domainName": "oxrse.uk",
     "isRoute53Domain": true,
     "enableContainerInsights": null
