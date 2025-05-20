@@ -8,8 +8,9 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_logs as logs,
     aws_iam as iam,
-    aws_s3 as s3,
+    aws_s3 as s3, RemovalPolicy, Duration,
 )
+from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer
 from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from constructs import Construct
 from nag_supressions import suppress_nags_pre_synth
@@ -25,7 +26,9 @@ class GalvFrontend(Stack):
         self.domain_name = self.node.get_context("domainName")
         self.subdomain = self.node.get_context("frontendSubdomain")
         self.fqdn = f"{self.subdomain}.{self.domain_name}".lstrip(".")
-        self.is_route53_domain = self.node.try_get_context("isRoute53Domain") or False
+        self.is_route53_domain = self.node.try_get_context("isRoute53Domain")
+        if self.is_route53_domain is None:
+            self.is_route53_domain = True
         self.frontend_version = self.node.try_get_context("frontendVersion") or "latest"
         self.log_bucket = log_bucket
 
@@ -78,6 +81,7 @@ class GalvFrontend(Stack):
             raise ValueError(get_aws_custom_cert_instructions(self.fqdn))
 
         if self.is_route53_domain:
+            print(f"Creating new certificate for {self.fqdn}")
             zone = route53.HostedZone.from_lookup(self, f"{self.name}-FrontendZone", domain_name=self.domain_name)
             self.certificate = acm.Certificate(
                 self,
@@ -95,14 +99,65 @@ class GalvFrontend(Stack):
         self.cluster = ecs.Cluster(self, f"{self.name}-FrontendCluster")
 
     def _create_service(self):
-        web_acl = create_waf_scope_web_acl(
-            self, f"{self.name}-FrontendWAF", name=f"{self.name}-frontend", scope_type="REGIONAL", log_bucket=None
+        # TODO: Replace with a custom ALB + Fargate service
+        vpc = ec2.Vpc(
+            self,
+            f"{self.name}-FrontendVpc",
+            max_azs=2,
+            nat_gateways=0,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24
+                )
+            ]
+        )
+        alb_sg = ec2.SecurityGroup(
+            self,
+            f"{self.name}-FrontendALBSecurityGroup",
+            vpc=vpc,
+            allow_all_outbound=True,
+            description="Security group for ALB (allow HTTP/S from anywhere)",
+        )
+        ecs_sg = ec2.SecurityGroup(
+            self,
+            f"{self.name}-FrontendECSSecurityGroup",
+            vpc=vpc,
+            allow_all_outbound=True,
+            description="Security group for ECS (allow traffic from ALB)",
+        )
+        alb_sg.add_ingress_rule(
+            peer=ec2.Peer.any_ipv4(),
+            connection=ec2.Port.tcp(80),
+            description="Allow HTTP traffic from anywhere",
+        )
+        alb_sg.add_ingress_rule(
+            peer=ec2.Peer.any_ipv4(),
+            connection=ec2.Port.tcp(443),
+            description="Allow HTTPS traffic from anywhere",
+        )
+        alb_sg.add_ingress_rule(
+            peer=ec2.Peer.any_ipv6(),
+            connection=ec2.Port.tcp(80),
+            description="Allow HTTP traffic from anywhere",
+        )
+        alb_sg.add_ingress_rule(
+            peer=ec2.Peer.any_ipv6(),
+            connection=ec2.Port.tcp(443),
+            description="Allow HTTPS traffic from anywhere",
+        )
+        ecs_sg.add_ingress_rule(
+            peer=alb_sg,
+            connection=ec2.Port.tcp(80),
+            description="Allow HTTP traffic from ALB",
         )
 
-        log_group = logs.LogGroup(
+        cluster = ecs.Cluster(
             self,
-            f"{self.name}-FrontendLogGroup",
-            retention=logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY,
+            f"{self.name}-FrontendCluster",
+            vpc=vpc,
+            security_groups=[ecs_sg],
         )
 
         repo = ecr.Repository.from_repository_name(
@@ -111,50 +166,94 @@ class GalvFrontend(Stack):
             repository_name="galv-frontend"
         )
 
-        service = ecs_patterns.ApplicationLoadBalancedFargateService(
+        task_definition = ecs.TaskDefinition(
+            self,
+            f"{self.name}-FrontendTaskDef",
+            compatibility=ecs.Compatibility.FARGATE,
+            cpu="512",
+            memory_mib="1024",
+            network_mode=ecs.NetworkMode.AWS_VPC,
+        )
+
+        task_definition.add_container(
+            f"{self.name}-FrontendContainer",
+            image=ecs.ContainerImage.from_ecr_repository(
+                repository=repo,
+                tag=self.frontend_version
+            ),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="frontend",
+                log_group=logs.LogGroup(
+                    self,
+                    f"{self.name}-FrontendLogGroup",
+                    retention=logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY,
+                    removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
+                ),
+            ),
+            port_mappings=[ecs.PortMapping(container_port=80)],
+            environment={
+                "ENV": "production" if self.is_production else "development",
+                "LOG_LEVEL": "info",
+                # TODO: link to backend?
+            },
+        )
+
+        service = ecs.FargateService(
             self,
             f"{self.name}-FrontendService",
-            cluster=self.cluster,
-            cpu=256,
-            memory_limit_mib=512,
+            cluster=cluster,
+            task_definition=task_definition,
+            assign_public_ip_address=False,
+            security_group=ecs_sg,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PUBLIC,
+            ),
             desired_count=1,
             min_healthy_percent=50,
             max_healthy_percent=200,
-            public_load_balancer=True,
-            certificate=self.certificate,
-            domain_name=self.fqdn,
-            domain_zone=route53.HostedZone.from_lookup(self, "Zone", domain_name=self.domain_name),
-            redirect_http=True,
-            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                image=ecs.ContainerImage.from_ecr_repository(
-                    repository=repo,
-                    tag=self.frontend_version
-                ),
-                container_port=80,
-                log_driver=ecs.LogDrivers.aws_logs(
-                    stream_prefix="galv-frontend",
-                    log_group=log_group,
-                ),
-            )
         )
 
-        service.load_balancer.log_access_logs(
-            bucket=self.log_bucket,
-            prefix="Frontend-ALB-logs"
-        )
-
-        # Attach WAF to ALB
-        alb = service.load_balancer.node.default_child
-        CfnWebACLAssociation(
+        alb = ApplicationLoadBalancer(
             self,
-            f"{self.name}-FrontendWafAssociation",
-            resource_arn=service.load_balancer.load_balancer_arn,
-            web_acl_arn=web_acl.attr_arn,
+            f"{self.name}-FrontendALB",
+            vpc=vpc,
+            internet_facing=True,
+            security_group=alb_sg,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PUBLIC,
+            ),
         )
-        # Secure ALB headers + optional output
-        alb.add_override("Properties.LoadBalancerAttributes", [
-            {"Key": "routing.http.drop_invalid_header_fields.enabled", "Value": "true"},
-            {"Key": "deletion_protection.enabled", "Value": str(self.is_production).lower()}
-        ])
+
+        listener = alb.add_listener(
+            f"{self.name}-FrontendListener",
+            port=443,
+            open=True,
+            protocol=ecs.Protocol.HTTPS,
+            certificates=[self.certificate],
+        )
+        listener.add_targets(
+            f"{self.name}-FrontendTargetGroup",
+            port=80,
+            targets=[service],
+            health_check=ecs.HealthCheck(
+                path="/",
+                interval=Duration.seconds(30),
+                timeout=Duration.seconds(5),
+                healthy_threshold_count=2,
+                unhealthy_threshold_count=2,
+            ),
+        )
+
+        alb.add_listener(
+            f"{self.name}-FrontendHttpListener",
+            port=80,
+            open=True,
+            default_action=ecs.ListenerAction.redirect(
+                host=self.fqdn,
+                port="443",
+                protocol="HTTPS",
+                permanent=True,
+            ),
+        )
 
         CfnOutput(self, "FrontendUrl", value=f"https://{self.fqdn}")

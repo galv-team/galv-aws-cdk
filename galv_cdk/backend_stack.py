@@ -98,6 +98,7 @@ class GalvBackend(Stack):
             raise ValueError(get_aws_custom_cert_instructions(self.fqdn))
 
         if self.is_route53_domain:
+            print(f"Creating new certificate for {self.fqdn}")
             zone = route53.HostedZone.from_lookup(self, f"{self.name}-BackendHostedZone", domain_name=self.domain_name)
             self.certificate = acm.Certificate(
                 self,

@@ -43,7 +43,7 @@ if is_production is None:
 
 log_bucket_stack = LogBucketStack(
     app,
-    f"{name}-LBStack",
+    f"{name}-LogBucketStack",
     name=name,
     is_production=is_production,
     env={"account": account, "region": region},
@@ -51,7 +51,7 @@ log_bucket_stack = LogBucketStack(
 
 frontend = GalvFrontend(
     app,
-    f"{name}-FrontendWafStack",
+    f"{name}-FrontendStack",
     log_bucket=log_bucket_stack.log_bucket,
     certificate_arn=context.get("certificate_arn", None),
     env={"account": account, "region": region},
@@ -60,7 +60,7 @@ frontend = GalvFrontend(
 # Instantiate the stack
 backend = GalvBackend(
     app,
-    f"{name}-GalvStack",
+    f"{name}-BackendStack",
     log_bucket=log_bucket_stack.log_bucket,
     certificate_arn=context.get("certificate_arn", None),
     env={"account": account, "region": region},
