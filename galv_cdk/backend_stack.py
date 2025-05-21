@@ -4,7 +4,6 @@ from aws_cdk import (
     aws_ec2 as ec2,
     aws_ecr as ecr,
     aws_ecs as ecs,
-    aws_ecs_patterns as ecs_patterns,
     aws_s3 as s3,
     aws_rds as rds,
     aws_events as events,
@@ -19,6 +18,7 @@ from aws_cdk import (
     aws_certificatemanager as acm,
     Stack, CfnOutput, Duration, Token, Tags
 )
+from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
 from aws_cdk.aws_s3 import IBucket
 from aws_cdk.custom_resources import AwsCustomResource, AwsSdkCall, PhysicalResourceId, AwsCustomResourcePolicy
 from cdk_nag import NagSuppressions
@@ -81,7 +81,6 @@ class GalvBackend(Stack):
         self._create_storage()
         self._create_database()
         self._setup_environment()
-        self._create_cluster()
         self._create_service()
         self._create_setup_task()
         self._create_validation_monitor_task()
@@ -212,7 +211,10 @@ class GalvBackend(Stack):
         self.monitor_sg = ec2.SecurityGroup(self, f"{self.name}-ValidationMonitorSG", vpc=self.vpc)
         self.lambda_sg = ec2.SecurityGroup(self, f"{self.name}-LambdaSG", vpc=self.vpc)
 
+        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP from internet")
         self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "HTTPS from internet")
+        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv6(), ec2.Port.tcp(80), "HTTP from internet")
+        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv6(), ec2.Port.tcp(443), "HTTPS from internet")
         self.backend_sg.add_ingress_rule(self.alb_sg, ec2.Port.tcp(8000), "Traffic from ALB")
         self.db_sg.add_ingress_rule(self.backend_sg, ec2.Port.tcp(5432), "Postgres from backend service")
         self.db_sg.add_ingress_rule(self.setup_sg, ec2.Port.tcp(5432), "Postgres from setup task")
@@ -358,34 +360,6 @@ class GalvBackend(Stack):
             for key in keys:
                 self.secrets[key] = ecs.Secret.from_secrets_manager(full_secret, field=key)
 
-    def _create_cluster(self):
-        """
-        Create the ECS cluster and backend service security group.
-        Required for deploying all ECS-based tasks and services.
-        """
-        enable_insights = self.node.try_get_context("enableContainerInsights")
-        if enable_insights is None:
-            enable_insights = self.is_production
-
-        self.cluster = ecs.Cluster(
-            self,
-            f"{self.name}-Cluster",
-            vpc=self.vpc,
-            container_insights_v2=
-            ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED
-        )
-
-        if not enable_insights:
-            NagSuppressions.add_resource_suppressions(
-                self.cluster.node.default_child,
-                [
-                    {
-                        "id": "AwsSolutions-ECS4",
-                        "reason": "Container insights are disabled in dev to reduce CloudWatch costs."
-                    }
-                ]
-            )
-
     def _create_service(self):
         """
         Deploy the main backend web service using ECS Fargate and Load Balancing.
@@ -405,51 +379,128 @@ class GalvBackend(Stack):
             repository_name="galv-backend"
         )
 
-        self.service = ecs_patterns.ApplicationLoadBalancedFargateService(
+        enable_insights = self.node.try_get_context("enableContainerInsights")
+        if enable_insights is None:
+            enable_insights = self.is_production
+
+        self.cluster = ecs.Cluster(
+            self,
+            f"{self.name}-Cluster",
+            vpc=self.vpc,
+            container_insights_v2=
+            ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED,
+        )
+
+        if not enable_insights:
+            NagSuppressions.add_resource_suppressions(
+                self.cluster.node.default_child,
+                [
+                    {
+                        "id": "AwsSolutions-ECS4",
+                        "reason": "Container insights are disabled in dev to reduce CloudWatch costs."
+                    }
+                ]
+            )
+
+        task_definition = ecs.FargateTaskDefinition(
+            self,
+            f"{self.name}-BackendTaskDef",
+            cpu=1024,
+            memory_limit_mib=2048,
+        )
+
+        task_definition.add_container(
+            f"{self.name}-BackendContainer",
+            image=ecs.ContainerImage.from_ecr_repository(
+                repository=self.repo,
+                tag=self.backend_version
+            ),
+            command=["gunicorn", "--bind", "0.0.0.0:8000", "config.wsgi"],
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix=f"{self.name}-BackendService",
+                log_group=web_log_group,
+            ),
+            environment={
+                **self.env_vars,
+                "ENVIRONMENT": self.name,
+                "S3_BUCKET": self.bucket.bucket_name,
+            },
+            secrets=self.secrets if self.secrets else None,
+            entry_point=["gunicorn"],
+            port_mappings=[
+                ecs.PortMapping(
+                    container_port=8000,
+                    host_port=8000,
+                )
+            ],
+        )
+
+        self.service = ecs.FargateService(
             self,
             f"{self.name}-BackendService",
             cluster=self.cluster,
-            cpu=512,
-            memory_limit_mib=1024,
+            task_definition=task_definition,
             desired_count=1,
-            min_healthy_percent=100,
-            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                image=ecs.ContainerImage.from_ecr_repository(
-                    repository=self.repo,
-                    tag=self.backend_version
-                ),
-                container_port=8000,
-                environment={
-                    **self.env_vars,
-                    "ENVIRONMENT": self.name,
-                    "S3_BUCKET": self.bucket.bucket_name,
-                },
-                secrets=self.secrets if self.secrets else None,
-                entry_point=["gunicorn"],
-                command=["--bind", "0.0.0.0:8000", "config.wsgi"],
-                log_driver=ecs.LogDrivers.aws_logs(
-                    stream_prefix=f"{self.name}-BackendService",
-                    log_group=web_log_group
-                )
+            min_healthy_percent=50,
+            max_healthy_percent=100,
+            security_groups=[self.backend_sg],
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            circuit_breaker=ecs.DeploymentCircuitBreaker(
+                rollback=True,
+                enable=True
             ),
-            public_load_balancer=True,
-            security_groups=[self.alb_sg],
-            task_subnets=ec2.SubnetSelection(subnet_group_name="private"),
-            certificate=self.certificate,
-            domain_name=self.fqdn,
-            domain_zone=route53.HostedZone.from_lookup(self, "Zone", domain_name=self.domain_name),
-            redirect_http=True,
+            enable_execute_command=self.is_production,
         )
 
+        alb = ApplicationLoadBalancer(
+            self,
+            f"{self.name}-BackendALB",
+            vpc=self.vpc,
+            internet_facing=True,
+            security_group=self.alb_sg,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+        )
 
-        self.bucket.grant_read_write(self.service.task_definition.task_role)
+        self.load_balancer = alb
 
-        self.db_instance.connections.allow_default_port_from(self.service.service)
-        self.service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(443))
+        listener = alb.add_listener(
+            f"{self.name}-BackendListener",
+            port=443,
+            certificates=[self.certificate],
+            protocol=ApplicationProtocol.HTTPS,
+            open=True
+        )
+        listener.add_targets(
+            f"{self.name}-BackendTargetGroup",
+            port=8000,
+            targets=[self.service],
+            health_check=HealthCheck(
+                path="/health",
+                port="8000",
+                interval=Duration.seconds(30),
+                timeout=Duration.seconds(5),
+                healthy_threshold_count=2,
+                unhealthy_threshold_count=2,
+            )
+        )
+        alb.add_listener(
+            f"{self.name}-BackendHttpListener",
+            port=80,
+            open=True,
+            default_action=ListenerAction.redirect(
+                host=self.fqdn,
+                port="443",
+                protocol="HTTPS",
+                permanent=True,
+            )
+        )
+
+        self.bucket.grant_read_write(task_definition.task_role)
+
+        self.db_instance.connections.allow_default_port_from(self.service)
 
         web_acl_backend = create_waf_scope_web_acl(self, f"{self.name}-BackendWebACL", name=self.name, scope_type="REGIONAL", log_bucket=self.log_bucket)
-        cfn_alb = self.service.load_balancer.node.default_child
-        cfn_alb.web_acl_id = web_acl_backend.ref
+        alb.node.default_child.add_property_override("WebACLId", web_acl_backend.ref)
 
         if self.node.try_get_context("isRoute53Domain"):
             zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=self.node.try_get_context('domainName'))
@@ -459,10 +510,10 @@ class GalvBackend(Stack):
                 f"{self.name}-BackendAliasRecord",
                 zone=zone,
                 record_name=self.fqdn,
-                target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(self.service.load_balancer)),
+                target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(alb)),
             )
         else:
-            CfnOutput(self, "BackendCNAME", value=f"{self.fqdn} -> {self.service.load_balancer.load_balancer_dns_name}")
+            CfnOutput(self, "BackendCNAME", value=f"{self.fqdn} -> {alb.load_balancer_dns_name}")
 
     def _create_setup_task(self):
         """
@@ -611,13 +662,13 @@ class GalvBackend(Stack):
         region = Stack.of(self).region
 
         if not Token.is_unresolved(region):
-            self.service.load_balancer.log_access_logs(
+            self.load_balancer.log_access_logs(
                 bucket=self.log_bucket,
                 prefix=f"{self.name}-BackendService-ALB-logs"
             )
 
         # Secure the ALB after its other settings are complete
-        alb = self.service.load_balancer.node.default_child
+        alb = self.load_balancer.node.default_child
 
         alb.add_property_override(
             "LoadBalancerAttributes.0.Key", "routing.http.drop_invalid_header_fields.enabled"

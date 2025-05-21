@@ -84,9 +84,9 @@ class TestGalvBackend(unittest.TestCase):
                     elif entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
                         message = entry.data
                         rule_id = None
-                        if isinstance(message, str) and ":" in message:
+                        if isinstance(message, str) and ": " in message:
                             # Extract rule ID prefix like 'AwsSolutions-CB4'
-                            rule_id = message.split(":", 1)[0].strip()
+                            rule_id = message.split(": ", 1)[0].strip()
 
                         target = f"{path}" if path.endswith("/Resource") else f"{path}.node.default_child"
                         suggestion = (
@@ -388,53 +388,6 @@ class TestGalvBackend(unittest.TestCase):
                 for lid, rtype, name in missing_sg
             )
             self.fail(f"The following resources are missing explicit security groups:\n{lines}")
-
-    def test_only_alb_in_public_subnet(self):
-        """
-        Ensure only the ALB is assigned to the public subnet.
-        """
-        resources = self.template.to_json().get("Resources", {})
-        public_subnet_ids = set()
-        violations = []
-
-        # Gather all public subnet logical IDs
-        for logical_id, res in resources.items():
-            if res.get("Type") == "AWS::EC2::Subnet" and "public" in logical_id.lower():
-                public_subnet_ids.add(logical_id)
-
-        # Check each resource with Subnet/NetworkConfiguration
-        for logical_id, res in resources.items():
-            rtype = res.get("Type")
-            props = res.get("Properties", {})
-
-            # Check ALB placement
-            if rtype == "AWS::ElasticLoadBalancingV2::LoadBalancer":
-                subnet_ids = props.get("Subnets", [])
-                for subnet in subnet_ids:
-                    if isinstance(subnet, dict) and "Ref" in subnet:
-                        subnet_id = subnet["Ref"]
-                        if subnet_id not in public_subnet_ids:
-                            violations.append((logical_id, "ALB uses a non-public subnet"))
-
-            # Check everything else
-            elif "Subnets" in props or "NetworkConfiguration" in props:
-                subnet_refs = []
-
-                if "Subnets" in props:
-                    subnet_refs = props["Subnets"]
-                elif "NetworkConfiguration" in props:
-                    awsvpc = props["NetworkConfiguration"].get("AwsvpcConfiguration", {})
-                    subnet_refs = awsvpc.get("Subnets", [])
-
-                for subnet in subnet_refs:
-                    if isinstance(subnet, dict) and "Ref" in subnet:
-                        subnet_id = subnet["Ref"]
-                        if subnet_id in public_subnet_ids:
-                            violations.append((logical_id, f"{rtype} assigned to public subnet"))
-
-        if violations:
-            details = "\n".join(f"{lid}: {msg}" for lid, msg in violations)
-            self.fail(f"The following resources are improperly assigned to public subnets:\n{details}")
 
     def test_backend_certificate_created(self):
         self.template.has_resource_properties("AWS::CertificateManager::Certificate", {

@@ -3,18 +3,19 @@ from aws_cdk import (
     aws_ec2 as ec2,
     aws_ecr as ecr,
     aws_ecs as ecs,
-    aws_ecs_patterns as ecs_patterns,
+    aws_route53_targets as route53_targets,
     aws_certificatemanager as acm,
     aws_route53 as route53,
     aws_logs as logs,
     aws_iam as iam,
     aws_s3 as s3, RemovalPolicy, Duration,
 )
-from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer
-from aws_cdk.aws_wafv2 import CfnWebACLAssociation
+from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
+from cdk_nag import NagSuppressions
 from constructs import Construct
 from nag_supressions import suppress_nags_pre_synth
 from utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
+
 
 class GalvFrontend(Stack):
     def __init__(self, scope: Construct, id: str, log_bucket: s3.IBucket, certificate_arn: str = None, **kwargs) -> None:
@@ -34,7 +35,6 @@ class GalvFrontend(Stack):
 
         self._update_log_bucket_access()
         self._create_cert(certificate_arn)
-        self._create_cluster()
         self._create_service()
 
         suppress_nags_pre_synth(self)
@@ -95,11 +95,7 @@ class GalvFrontend(Stack):
                 self, f"{self.name}-FrontendCertificate", certificate_arn
             )
 
-    def _create_cluster(self):
-        self.cluster = ecs.Cluster(self, f"{self.name}-FrontendCluster")
-
     def _create_service(self):
-        # TODO: Replace with a custom ALB + Fargate service
         vpc = ec2.Vpc(
             self,
             f"{self.name}-FrontendVpc",
@@ -153,12 +149,28 @@ class GalvFrontend(Stack):
             description="Allow HTTP traffic from ALB",
         )
 
+        enable_insights = self.node.try_get_context("enableContainerInsights")
+        if enable_insights is None:
+            enable_insights = self.is_production
+
         cluster = ecs.Cluster(
             self,
             f"{self.name}-FrontendCluster",
             vpc=vpc,
-            security_groups=[ecs_sg],
+            container_insights_v2=
+            ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED,
         )
+
+        if not enable_insights:
+            NagSuppressions.add_resource_suppressions(
+                cluster.node.default_child,
+                [
+                    {
+                        "id": "AwsSolutions-ECS4",
+                        "reason": "Container insights are disabled in dev to reduce CloudWatch costs."
+                    }
+                ]
+            )
 
         repo = ecr.Repository.from_repository_name(
             self,
@@ -166,13 +178,11 @@ class GalvFrontend(Stack):
             repository_name="galv-frontend"
         )
 
-        task_definition = ecs.TaskDefinition(
+        task_definition = ecs.FargateTaskDefinition(
             self,
             f"{self.name}-FrontendTaskDef",
-            compatibility=ecs.Compatibility.FARGATE,
-            cpu="512",
-            memory_mib="1024",
-            network_mode=ecs.NetworkMode.AWS_VPC,
+            cpu=256,
+            memory_limit_mib=512,
         )
 
         task_definition.add_container(
@@ -203,14 +213,18 @@ class GalvFrontend(Stack):
             f"{self.name}-FrontendService",
             cluster=cluster,
             task_definition=task_definition,
-            assign_public_ip_address=False,
-            security_group=ecs_sg,
+            security_groups=[ecs_sg],
             vpc_subnets=ec2.SubnetSelection(
                 subnet_type=ec2.SubnetType.PUBLIC,
             ),
             desired_count=1,
             min_healthy_percent=50,
             max_healthy_percent=200,
+            circuit_breaker=ecs.DeploymentCircuitBreaker(
+                rollback=True,
+                enable=True
+            ),
+            enable_execute_command=self.is_production,
         )
 
         alb = ApplicationLoadBalancer(
@@ -228,14 +242,14 @@ class GalvFrontend(Stack):
             f"{self.name}-FrontendListener",
             port=443,
             open=True,
-            protocol=ecs.Protocol.HTTPS,
+            protocol=ApplicationProtocol.HTTPS,
             certificates=[self.certificate],
         )
         listener.add_targets(
             f"{self.name}-FrontendTargetGroup",
             port=80,
             targets=[service],
-            health_check=ecs.HealthCheck(
+            health_check=HealthCheck(
                 path="/",
                 interval=Duration.seconds(30),
                 timeout=Duration.seconds(5),
@@ -248,12 +262,28 @@ class GalvFrontend(Stack):
             f"{self.name}-FrontendHttpListener",
             port=80,
             open=True,
-            default_action=ecs.ListenerAction.redirect(
+            default_action=ListenerAction.redirect(
                 host=self.fqdn,
                 port="443",
                 protocol="HTTPS",
                 permanent=True,
             ),
         )
+
+        web_acl_frontend = create_waf_scope_web_acl(self, f"{self.name}-FrontendWebACL", name=self.name, scope_type="REGIONAL", log_bucket=self.log_bucket)
+        alb.node.default_child.add_property_override("WebACLId", web_acl_frontend.ref)
+
+        if self.node.try_get_context("isRoute53Domain"):
+            zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=self.node.try_get_context('domainName'))
+
+            route53.ARecord(
+                self,
+                f"{self.name}-FrontendAliasRecord",
+                zone=zone,
+                record_name=self.fqdn,
+                target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(alb)),
+            )
+        else:
+            CfnOutput(self, "FrontendCNAME", value=f"{self.fqdn} -> {alb.load_balancer_dns_name}")
 
         CfnOutput(self, "FrontendUrl", value=f"https://{self.fqdn}")

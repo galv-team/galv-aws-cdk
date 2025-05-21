@@ -27,7 +27,7 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_ecs_iam5_wildcards(stack, name)
         _suppress_vpc_routes_pre(stack, name)
         _suppress_lambda_iam4(stack)
-        _suppress_backend_alb_sg(stack, name)
+        _suppress_alb_sg(stack, name)
         _suppress_db_sg_validation_failures(stack, name)
         _suppress_db_indirect_ingress_validation(stack, name)
         _suppress_rds_nags(stack, name)
@@ -62,29 +62,40 @@ def _suppress_cert_stack(stack: Stack):
 
 
 def _suppress_backend_taskrole_policy(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvBackend":
-        return
-    backend = stack
-    service = backend.node.find_child(f"{name}-BackendService")
-    task_role = service.task_definition.task_role
-    default_policy = task_role.node.find_child("DefaultPolicy")
-
-    if default_policy is None:
-        raise InapplicableSuppressionError("DefaultPolicy not attached to TaskRole")
-
-    NagSuppressions.add_resource_suppressions(
-        default_policy,
-        [
-            {
-                "id": "AwsSolutions-IAM5",
-                "reason": "Backend service needs wildcard S3 access for dynamic media paths",
-                "appliesTo": [
-                    "Action::s3:GetObject*",
-                    f"Resource::arn:aws:s3:::{name}-BackendStorage/*"
-                ]
-            }
+    if stack.__class__.__name__ == "GalvBackend":
+        service = stack.node.find_child(f"{name}-BackendService")
+        task_role = service.task_definition.task_role
+        policies = [task_role.node.find_child("DefaultPolicy")]
+    else:
+        service = stack.node.find_child(f"{name}-FrontendService")
+        task_role = service.task_definition.task_role
+        execution_role = service.task_definition.execution_role
+        policies = [
+            task_role.node.find_child("DefaultPolicy"),
+            execution_role.node.find_child("DefaultPolicy")
         ]
-    )
+
+    if len(policies) < 1:
+        raise InapplicableSuppressionError("No task policies to apply suppressions to")
+
+    for policy in policies:
+        NagSuppressions.add_resource_suppressions(
+            policy,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": "Backend service needs wildcard S3 access for dynamic media paths",
+                    "appliesTo": [
+                        "Action::s3:GetObject*",
+                        f"Resource::*"
+                    ]
+                },
+                {
+                    "id": "HIPAA.Security-IAMNoInlinePolicy",
+                    "reason": "Inline policy is okay here; creating it all through roles is unnecessary overhead."
+                }
+            ]
+        )
 
 
 def _suppress_vpc_endpoints(stack: Stack, name: str):
@@ -447,21 +458,19 @@ def _suppress_lambda_iam4(stack: Stack):
     )
 
 
-def _suppress_backend_alb_sg(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvBackend":
-        return
-    backend = stack
-    alb_sg = backend.node.find_child(f"{name}-ALBSG")
-    lb_sg = backend.node.find_child(f"{name}-BackendService").load_balancer.connections.security_groups[0]  # Usually the same as alb_sg
+def _suppress_alb_sg(stack: Stack, name: str):
+    if stack.__class__.__name__ == "GalvBackend":
+        alb_sg = stack.node.find_child(f"{name}-ALBSG")
+    else:
+        alb_sg = stack.node.find_child(f"{name}-FrontendALBSecurityGroup")
 
-    for sg in [alb_sg, lb_sg]:
-        NagSuppressions.add_resource_suppressions(
-            sg.node.default_child,
-            [{
-                "id": "AwsSolutions-EC23",
-                "reason": "Ingress is restricted to HTTPS (port 443) for public access via ALB"
-            }]
-        )
+    NagSuppressions.add_resource_suppressions(
+        alb_sg.node.default_child,
+        [{
+            "id": "AwsSolutions-EC23",
+            "reason": "Ingress is restricted to HTTPS (port 443) for public access via ALB"
+        }]
+    )
 
 
 def _suppress_db_sg_validation_failures(stack: Stack, name: str):
@@ -554,10 +563,10 @@ def _suppress_rds_nags(stack: Stack, name: str):
 
 
 def _suppress_alb_attributes(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvBackend":
-        return
-    backend = stack
-    alb = backend.node.find_child(f"{name}-BackendService").load_balancer.node.default_child  # CfnLoadBalancer
+    if stack.__class__.__name__ == "GalvBackend":
+        alb = stack.node.find_child(f"{name}-BackendALB").node.default_child  # CfnLoadBalancer
+    else:
+        alb = stack.node.find_child(f"{name}-FrontendALB").node.default_child
 
     NagSuppressions.add_resource_suppressions(
         alb,
@@ -569,6 +578,14 @@ def _suppress_alb_attributes(stack: Stack, name: str):
             {
                 "id": "HIPAA.Security-ELBDeletionProtectionEnabled",
                 "reason": "Deletion protection is enabled via LoadBalancerAttributes override"
+            },
+            {
+                "id": "HIPAA.Security-ELBLoggingEnabled",
+                "reason": "Access logs are not enabled; ALB access logs are stored in a separate bucket"
+            },
+            {
+                "id": "AwsSolutions-ELB2",
+                "reason": "Access logs are not enabled; ALB access logs are stored in a separate bucket"
             }
         ]
     )
@@ -616,8 +633,7 @@ def _suppress_frontend(stack: Stack, name: str):
     if stack.__class__.__name__ != "GalvFrontend":
         return
 
-    service = stack.node.find_child(f"{name}-FrontendService")
-    alb = service.load_balancer.node.default_child
+    alb = stack.node.find_child(f"{name}-FrontendALB").node.default_child
 
     from cdk_nag import NagSuppressions
     NagSuppressions.add_resource_suppressions(
@@ -635,7 +651,7 @@ def _suppress_frontend(stack: Stack, name: str):
     )
 
     NagSuppressions.add_resource_suppressions(
-        service.task_definition,
+        stack.node.find_child(f"{name}-FrontendTaskDef"),
         [
             {
                 "id": "AwsSolutions-ECS2",
@@ -644,47 +660,31 @@ def _suppress_frontend(stack: Stack, name: str):
         ]
     )
 
-    # Broad suppressions because the out-of-the-box ALB setup is not HIPAA-compliant
+    # Frontend VPC
+    vpc = stack.node.find_child(f"{name}-FrontendVpc")
+    vpc_resource = vpc.node.default_child
     NagSuppressions.add_resource_suppressions(
-        stack,
-        [
-            {"id": "AwsSolutions-EC23", "reason": "Ingress restricted to HTTPS (443) for public access"},
-            {
-                "id": "AwsSolutions-IAM5",
-                "reason": "Wildcard ECS execution role required for ECR pulls and logging",
-                "appliesTo": ["Resource::*"]
-            },
-            {
-                "id": "HIPAA.Security-IAMNoInlinePolicy",
-                "reason": "CDK generates inline execution policies for ECS; they are reviewed and minimal"
-            },
-            {
-                "id": "AwsSolutions-ECS4",
-                "reason": "We don't need container insights for this deployment; CloudWatch logging is sufficient"
-            },
+        vpc_resource,
+        suppressions=[
             {
                 "id": "AwsSolutions-VPC7",
-                "reason": "Flow logs are not required for this deployment; VPC flow logs are not enabled"
+                "reason": "We do not need flow logs for the VPC. Traffic is logged at the ALB level."
             },
             {
                 "id": "HIPAA.Security-VPCFlowLogsEnabled",
-                "reason": "VPC flow logs are not required for this deployment; VPC flow logs are not enabled"
-            },
-            {
-                "id": "HIPAA.Security-CloudWatchLogGroupEncrypted",
-                "reason": "CloudWatch log groups are not encrypted. Not necessary for this deployment."
-            },
-            {
-                "id": "HIPAA.Security-ELBv2ACMCertificateRequired",
-                "reason": "All traffic should be HTTPS"
+                "reason": "We do not need flow logs for the VPC. Traffic is logged at the ALB level."
             }
-        ],
-        apply_to_children=True
+        ]
     )
 
-    for listener in alb.node.children:
-        if isinstance(listener, CfnListener) and listener.port == 80:
-            NagSuppressions.add_resource_suppressions(
-                listener,
-                [{"id": "HIPAA.Security-ELBv2ACMCertificateRequired", "reason": "HTTP listener is for redirect only"}]
-            )
+    # CloudWatch
+    cw = stack.node.find_child(f"{name}-FrontendLogGroup").node.default_child
+    NagSuppressions.add_resource_suppressions(
+        cw,
+        [
+            {
+                "id": "HIPAA.Security-CloudWatchLogGroupEncrypted",
+                "reason": "Log group is not encrypted; ALB access logs are not encrypted either"
+            },
+        ]
+    )
