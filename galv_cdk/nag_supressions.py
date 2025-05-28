@@ -68,10 +68,8 @@ def _suppress_backend_taskrole_policy(stack: Stack, name: str):
         policies = [task_role.node.find_child("DefaultPolicy")]
     else:
         service = stack.node.find_child(f"{name}-FrontendService")
-        task_role = service.task_definition.task_role
         execution_role = service.task_definition.execution_role
         policies = [
-            task_role.node.find_child("DefaultPolicy"),
             execution_role.node.find_child("DefaultPolicy")
         ]
 
@@ -111,8 +109,9 @@ def _suppress_vpc_endpoints(stack: Stack, name: str):
             ],
             apply_to_children=True
         )
-        return
-    sg = stack.node.find_child(f"{name}-EndpointSG")
+        sg = stack.node.find_child(f"{name}-FrontendECSSecurityGroup")
+    else:
+        sg = stack.node.find_child(f"{name}-EndpointSG")
     NagSuppressions.add_resource_suppressions(
         sg,
         [
@@ -161,6 +160,20 @@ def _suppress_backend_iams(stack: Stack, name: str):
     account = stack.account
 
     bucket = backend.node.find_child(f"{name}-BackendStorage")
+    NagSuppressions.add_resource_suppressions(
+        bucket,
+        [
+            {
+                "id": "AwsSolutions-S2",
+                "reason": "ACLs needed for ALB and ECS task log delivery with bucket-owner-full-control"
+            },
+            {
+                "id": "HIPAA.Security-S3BucketLevelPublicAccessProhibited",
+                "reason": "ACLs are only used internally; bucket access is otherwise private"
+            }
+        ]
+    )
+
     bucket_logical_id = stack.get_logical_id(bucket.node.default_child)
 
     applies_to = [
@@ -288,18 +301,6 @@ def _suppress_secret_rotation(stack: Stack, name: str):
                 {"id": "HIPAA.Security-SecretsManagerUsingKMSKey", "reason": reason}
             ]
         )
-
-    # Suppress secret attached to RDS instance
-    db_instance = backend.node.find_child(f"{name}-BackendDatabase")
-    rds_secret = db_instance.node.find_child("Secret")
-    NagSuppressions.add_resource_suppressions(
-        rds_secret,
-        [
-            {"id": "AwsSolutions-SMG4", "reason": reason},
-            {"id": "HIPAA.Security-SecretsManagerRotationEnabled", "reason": reason},
-            {"id": "HIPAA.Security-SecretsManagerUsingKMSKey", "reason": reason}
-        ]
-    )
 
 
 def _suppress_ecs_env_vars(stack: Stack, name: str):

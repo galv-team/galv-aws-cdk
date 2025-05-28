@@ -11,6 +11,7 @@ from aws_cdk import (
     aws_s3 as s3, RemovalPolicy, Duration,
 )
 from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
+from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from cdk_nag import NagSuppressions
 from constructs import Construct
 from nag_supressions import suppress_nags_pre_synth
@@ -18,7 +19,15 @@ from utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
 
 
 class GalvFrontend(Stack):
-    def __init__(self, scope: Construct, id: str, log_bucket: s3.IBucket, certificate_arn: str = None, **kwargs) -> None:
+    def __init__(
+            self,
+            scope: Construct,
+            id: str,
+            log_bucket: s3.IBucket,
+            certificate_arn: str = None,
+            backend_fqdn: str = None,
+            **kwargs
+    ) -> None:
         super().__init__(scope, id, **kwargs)
 
         self.name = self.node.try_get_context("name") or "galv"
@@ -27,6 +36,9 @@ class GalvFrontend(Stack):
         self.domain_name = self.node.get_context("domainName")
         self.subdomain = self.node.get_context("frontendSubdomain")
         self.fqdn = f"{self.subdomain}.{self.domain_name}".lstrip(".")
+        self.backend_fqdn = backend_fqdn
+        if not self.backend_fqdn:
+            raise ValueError("backend_fqdn must be provided to GalvFrontend")
         self.is_route53_domain = self.node.try_get_context("isRoute53Domain")
         if self.is_route53_domain is None:
             self.is_route53_domain = True
@@ -106,7 +118,12 @@ class GalvFrontend(Stack):
                     name="Public",
                     subnet_type=ec2.SubnetType.PUBLIC,
                     cidr_mask=24
-                )
+                ),
+                ec2.SubnetConfiguration(
+                    name="Private",
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    cidr_mask=24,
+                ),
             ]
         )
         alb_sg = ec2.SecurityGroup(
@@ -147,6 +164,20 @@ class GalvFrontend(Stack):
             peer=alb_sg,
             connection=ec2.Port.tcp(80),
             description="Allow HTTP traffic from ALB",
+        )
+
+        vpc.add_interface_endpoint(
+            "EcrApiEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.ECR,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[ecs_sg],
+        )
+
+        vpc.add_interface_endpoint(
+            "EcrDockerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[ecs_sg],
         )
 
         enable_insights = self.node.try_get_context("enableContainerInsights")
@@ -204,7 +235,7 @@ class GalvFrontend(Stack):
             environment={
                 "ENV": "production" if self.is_production else "development",
                 "LOG_LEVEL": "info",
-                # TODO: link to backend?
+                "VITE_GALV_API_BASE_URL": f"https://{self.backend_fqdn}/api",
             },
         )
 
@@ -224,7 +255,8 @@ class GalvFrontend(Stack):
                 rollback=True,
                 enable=True
             ),
-            enable_execute_command=self.is_production,
+            enable_execute_command=not self.is_production,
+            assign_public_ip=True,
         )
 
         alb = ApplicationLoadBalancer(
@@ -270,8 +302,13 @@ class GalvFrontend(Stack):
             ),
         )
 
-        web_acl_frontend = create_waf_scope_web_acl(self, f"{self.name}-FrontendWebACL", name=self.name, scope_type="REGIONAL", log_bucket=self.log_bucket)
-        alb.node.default_child.add_property_override("WebACLId", web_acl_frontend.ref)
+        web_acl_frontend = create_waf_scope_web_acl(self, f"{self.name}-FrontendWebACL", name=f"{self.name}-Frontend", scope_type="REGIONAL", log_bucket=self.log_bucket)
+        CfnWebACLAssociation(
+            self,
+            f"{self.name}-FrontendWebACLAssociation",
+            resource_arn=alb.load_balancer_arn,
+            web_acl_arn=web_acl_frontend.attr_arn
+        )
 
         if self.node.try_get_context("isRoute53Domain"):
             zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=self.node.try_get_context('domainName'))

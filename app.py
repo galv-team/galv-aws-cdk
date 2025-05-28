@@ -49,20 +49,21 @@ log_bucket_stack = LogBucketStack(
     env={"account": account, "region": region},
 )
 
-frontend = GalvFrontend(
-    app,
-    f"{name}-FrontendStack",
-    log_bucket=log_bucket_stack.log_bucket,
-    certificate_arn=context.get("certificate_arn", None),
-    env={"account": account, "region": region},
-)
-
 # Instantiate the stack
 backend = GalvBackend(
     app,
     f"{name}-BackendStack",
     log_bucket=log_bucket_stack.log_bucket,
     certificate_arn=context.get("certificate_arn", None),
+    env={"account": account, "region": region},
+)
+
+frontend = GalvFrontend(
+    app,
+    f"{name}-FrontendStack",
+    log_bucket=log_bucket_stack.log_bucket,
+    certificate_arn=context.get("certificate_arn", None),
+    backend_fqdn=backend.fqdn,
     env={"account": account, "region": region},
 )
 

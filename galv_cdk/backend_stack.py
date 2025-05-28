@@ -1,4 +1,6 @@
 import json
+import string
+from secrets import choice
 
 from aws_cdk import (
     aws_ec2 as ec2,
@@ -20,6 +22,7 @@ from aws_cdk import (
 )
 from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
 from aws_cdk.aws_s3 import IBucket
+from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from aws_cdk.custom_resources import AwsCustomResource, AwsSdkCall, PhysicalResourceId, AwsCustomResourcePolicy
 from cdk_nag import NagSuppressions
 from constructs import Construct
@@ -41,6 +44,10 @@ class GalvBackend(Stack):
         self.domain_name = self.node.try_get_context("domainName")
         backend_subdomain = self.node.try_get_context("backendSubdomain") or "api"
         self.fqdn = f"{backend_subdomain}.{self.domain_name}".lstrip(".")
+
+        frontend_subdomain = self.node.get_context("frontendSubdomain")
+        self.frontend_fqdn = f"{frontend_subdomain}.{self.domain_name}".lstrip(".")
+
         self.is_route53_domain = self.node.try_get_context("isRoute53Domain")
         if self.is_route53_domain is None:
             self.is_route53_domain = True
@@ -182,23 +189,36 @@ class GalvBackend(Stack):
         )
 
         # Add interface endpoints for private access to AWS services
-        vpc_endpoint_sg = ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
-        vpc_endpoint_sg.add_ingress_rule(ec2.Peer.ipv4(self.vpc.vpc_cidr_block), ec2.Port.tcp(443), "HTTPS from VPC")
+        self.vpc_endpoint_sg = ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
+        self.vpc_endpoint_sg.add_ingress_rule(ec2.Peer.ipv4(self.vpc.vpc_cidr_block), ec2.Port.tcp(443), "HTTPS from VPC")
 
         self.vpc.add_interface_endpoint(
             "SecretsManagerEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-            security_groups=[vpc_endpoint_sg],
+            security_groups=[self.vpc_endpoint_sg],
             subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
         )
 
         self.vpc.add_interface_endpoint(
             "CloudWatchLogsEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-            security_groups=[vpc_endpoint_sg],
+            security_groups=[self.vpc_endpoint_sg],
             subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
         )
 
+        self.vpc.add_interface_endpoint(
+            "EcrApiEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.ECR,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[self.vpc_endpoint_sg],
+        )
+
+        self.vpc.add_interface_endpoint(
+            "EcrDockerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[self.vpc_endpoint_sg],
+        )
 
     def _create_security_groups(self):
         """
@@ -220,6 +240,12 @@ class GalvBackend(Stack):
         self.db_sg.add_ingress_rule(self.setup_sg, ec2.Port.tcp(5432), "Postgres from setup task")
         self.db_sg.add_ingress_rule(self.monitor_sg, ec2.Port.tcp(5432), "Postgres from monitor task")
 
+        self.vpc_endpoint_sg.add_ingress_rule(
+            ec2.Peer.security_group_id(self.backend_sg.security_group_id),
+            ec2.Port.tcp(443),
+            "Allow HTTPS from backend service to ECR endpoints"
+        )
+
     def _create_storage(self):
         """
         Create an S3 bucket for backend storage. Used for media and data files.
@@ -231,7 +257,14 @@ class GalvBackend(Stack):
             auto_delete_objects=not self.is_production,
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.kms_key,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,  # Enables ACLs
+            enforce_ssl=True,
+            block_public_access=s3.BlockPublicAccess(
+                block_public_acls=False,
+                ignore_public_acls=False,
+                block_public_policy=True,
+                restrict_public_buckets=True
+            ),  # Have to allow ACL to let Django write to the bucket
             server_access_logs_bucket=self.log_bucket,
             server_access_logs_prefix=f"{self.name}-BackendStorage-access-logs"
         )
@@ -259,6 +292,8 @@ class GalvBackend(Stack):
             username="galvuser"
         )
 
+        db_name = "galvdb"
+
         self.db_instance = rds.DatabaseInstance(
             self,
             f"{self.name}-BackendDatabase",
@@ -276,7 +311,8 @@ class GalvBackend(Stack):
             allocated_storage=20,
             removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
             deletion_protection=self.is_production,
-            database_name="galvdb",
+            database_name=db_name,
+            credentials=rds.Credentials.from_secret(self.db_secret),
         )
 
         if not self.is_production:
@@ -302,7 +338,8 @@ class GalvBackend(Stack):
         inject_protected_env(self.env_vars, {
             "POSTGRES_HOST": self.db_instance.db_instance_endpoint_address,
             "POSTGRES_PORT": self.db_instance.db_instance_endpoint_port,
-            "POSTGRES_DB": "galvdb",
+            "POSTGRES_DB": db_name,
+            "POSTGRES_SSLMODE": "require",
         })
 
     def _setup_environment(self):
@@ -346,7 +383,10 @@ class GalvBackend(Stack):
             "DJANGO_STORE_MEDIA_FILES_ON_S3": "True",
             "DJANGO_STORE_STATIC_FILES_ON_S3": "True",
             "DJANGO_LABS_USE_OUR_S3_STORAGE": "True",
-            "DJANGO_LAB_STORAGE_QUOTA_BYTES": str(5 * 1024 * 1024 * 1024)
+            "DJANGO_LAB_STORAGE_QUOTA_BYTES": str(5 * 1024 * 1024 * 1024),
+            "DJANGO_SECRET_KEY": "".join([choice(string.ascii_letters + string.digits + string.punctuation.replace("\"", "").replace("\'", "").replace("\\", "")) for _ in range(50)]),
+            "VIRTUAL_HOST": self.fqdn,
+            "FRONTEND_VIRTUAL_HOST": f"https://{self.frontend_fqdn}",
         })
 
         secrets_name = self.node.try_get_context("backendSecretsName")
@@ -416,6 +456,7 @@ class GalvBackend(Stack):
                 tag=self.backend_version
             ),
             command=["gunicorn", "--bind", "0.0.0.0:8000", "config.wsgi"],
+            entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix=f"{self.name}-BackendService",
                 log_group=web_log_group,
@@ -426,7 +467,6 @@ class GalvBackend(Stack):
                 "S3_BUCKET": self.bucket.bucket_name,
             },
             secrets=self.secrets if self.secrets else None,
-            entry_point=["gunicorn"],
             port_mappings=[
                 ecs.PortMapping(
                     container_port=8000,
@@ -450,6 +490,7 @@ class GalvBackend(Stack):
                 enable=True
             ),
             enable_execute_command=self.is_production,
+            assign_public_ip=True,
         )
 
         alb = ApplicationLoadBalancer(
@@ -499,8 +540,13 @@ class GalvBackend(Stack):
 
         self.db_instance.connections.allow_default_port_from(self.service)
 
-        web_acl_backend = create_waf_scope_web_acl(self, f"{self.name}-BackendWebACL", name=self.name, scope_type="REGIONAL", log_bucket=self.log_bucket)
-        alb.node.default_child.add_property_override("WebACLId", web_acl_backend.ref)
+        web_acl_backend = create_waf_scope_web_acl(self, f"{self.name}-BackendWebACL", name=f"{self.name}-Backend", scope_type="REGIONAL", log_bucket=self.log_bucket)
+        CfnWebACLAssociation(
+            self,
+            f"{self.name}-BackendWebACLAssociation",
+            resource_arn=alb.load_balancer_arn,
+            web_acl_arn=web_acl_backend.attr_arn
+        )
 
         if self.node.try_get_context("isRoute53Domain"):
             zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name=self.node.try_get_context('domainName'))
@@ -543,6 +589,7 @@ class GalvBackend(Stack):
                 tag=self.backend_version
             ),
             command=["/code/setup_db.sh"],
+            entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="setup-db",
                 log_group=log_group,
@@ -627,6 +674,7 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
+            entry_point=["/bin/sh", "-c"],
             command=["python", "manage.py", "validation_monitor"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix=f"{self.name}-ValidationMonitor",

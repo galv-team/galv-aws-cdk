@@ -273,6 +273,7 @@ class TestGalvBackend(unittest.TestCase):
             "monitorIntervalMinutes": 5,
             "mailFromDomain": "example.com",
             "domainName": "example.com",
+            "frontendSubdomain": "",
         })
         stack = GalvBackend(
             app,
@@ -291,6 +292,7 @@ class TestGalvBackend(unittest.TestCase):
             "monitorIntervalMinutes": 0,
             "mailFromDomain": "example.com",
             "domainName": "example.com",
+            "frontendSubdomain": "",
         })
         stack = GalvBackend(
             app,
@@ -465,6 +467,49 @@ class TestGalvBackend(unittest.TestCase):
 
         if violations:
             self.fail("Disallowed wildcard IAM actions:\n" + "\n".join(violations))
+
+    def test_all_networked_resources_use_same_vpc(self):
+        template = self.template.to_json()
+        resources = template["Resources"]
+
+        # Step 1: Map each subnet to its VPC
+        subnet_to_vpc = {}
+        for logical_id, resource in resources.items():
+            if resource["Type"] == "AWS::EC2::Subnet":
+                props = resource.get("Properties", {})
+                vpc_id = props.get("VpcId")
+                if isinstance(vpc_id, dict) and "Ref" in vpc_id:
+                    subnet_to_vpc[logical_id] = vpc_id["Ref"]
+
+        # Step 2: Track VPCs used by ECS services, SGs, and VPCEs
+        vpc_references = set()
+
+        for resource in resources.values():
+            props = resource.get("Properties", {})
+            rtype = resource["Type"]
+
+            if rtype == "AWS::EC2::VPCEndpoint" or rtype == "AWS::EC2::SecurityGroup":
+                vpc_id = props.get("VpcId")
+                if isinstance(vpc_id, dict) and "Ref" in vpc_id:
+                    vpc_references.add(vpc_id["Ref"])
+
+            elif rtype == "AWS::ECS::Service":
+                subnet_config = props.get("NetworkConfiguration", {}).get("AwsvpcConfiguration", {})
+                subnet_ids = subnet_config.get("Subnets", [])
+                for subnet in subnet_ids:
+                    if isinstance(subnet, dict) and "Ref" in subnet:
+                        subnet_id = subnet["Ref"]
+                        if subnet_id in subnet_to_vpc:
+                            vpc_references.add(subnet_to_vpc[subnet_id])
+                        else:
+                            # fallback if subnet → VPC mapping was missing
+                            vpc_references.add(subnet_id)
+
+        self.assertEqual(
+            len(vpc_references), 1,
+            f"Expected all networked resources to use the same VPC, but found: {vpc_references}"
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

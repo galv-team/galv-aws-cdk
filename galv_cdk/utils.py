@@ -89,7 +89,7 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
                 override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                 statement=wafv2.CfnWebACL.StatementProperty(
                     managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
-                        name=f"AWSManagedRulesCommonRuleSet",
+                        name="AWSManagedRulesCommonRuleSet",
                         vendor_name="AWS"
                     )
                 ),
