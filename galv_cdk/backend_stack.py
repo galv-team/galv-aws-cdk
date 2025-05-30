@@ -87,6 +87,7 @@ class GalvBackend(Stack):
         self._create_security_groups()
         self._create_storage()
         self._create_database()
+        self._create_loadbalancer()
         self._setup_environment()
         self._create_service()
         self._create_setup_task()
@@ -342,6 +343,23 @@ class GalvBackend(Stack):
             "POSTGRES_SSLMODE": "require",
         })
 
+    def _create_loadbalancer(self):
+
+        alb = ApplicationLoadBalancer(
+            self,
+            f"{self.name}-BackendALB",
+            vpc=self.vpc,
+            internet_facing=True,
+            security_group=self.alb_sg,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+        )
+        alb.log_access_logs(
+            bucket=self.log_bucket,
+            prefix=f"{self.name}-BackendALB-AccessLogs",
+        )
+
+        self.load_balancer = alb
+
     def _setup_environment(self):
         """
         Configure application secrets and environment variables including SMTP credentials
@@ -387,6 +405,9 @@ class GalvBackend(Stack):
             "DJANGO_SECRET_KEY": "".join([choice(string.ascii_letters + string.digits + string.punctuation.replace("\"", "").replace("\'", "").replace("\\", "")) for _ in range(50)]),
             "VIRTUAL_HOST": self.fqdn,
             "FRONTEND_VIRTUAL_HOST": f"https://{self.frontend_fqdn}",
+            "PYTHONPATH": "/code/backend_django",
+            "DJANGO_ELB_HOST": self.load_balancer.load_balancer_dns_name,
+            "SECURE_PROXY_SSL_HEADER": "HTTP_X_FORWARDED_PROTO:https",  # tell Django to trust the ALB's forwarded headers
         })
 
         secrets_name = self.node.try_get_context("backendSecretsName")
@@ -455,7 +476,13 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
-            command=["gunicorn", "--bind", "0.0.0.0:8000", "config.wsgi"],
+            # working_directory="/code/backend_django",
+            command=["gunicorn --bind 0.0.0.0:8000 config.wsgi"],
+            # command=[
+            #     "python", "-c",
+            #     "import sys, os; print('CWD:', os.getcwd()); print('PYTHONPATH:', sys.path); import config.wsgi; print('WSGI loaded')"
+            # ],
+            # command=["tail -f /dev/null"],
             entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix=f"{self.name}-BackendService",
@@ -483,28 +510,18 @@ class GalvBackend(Stack):
             desired_count=1,
             min_healthy_percent=50,
             max_healthy_percent=100,
+            health_check_grace_period=Duration.seconds(20),
             security_groups=[self.backend_sg],
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
             circuit_breaker=ecs.DeploymentCircuitBreaker(
                 rollback=True,
                 enable=True
             ),
-            enable_execute_command=self.is_production,
+            enable_execute_command=not self.is_production,
             assign_public_ip=True,
         )
 
-        alb = ApplicationLoadBalancer(
-            self,
-            f"{self.name}-BackendALB",
-            vpc=self.vpc,
-            internet_facing=True,
-            security_group=self.alb_sg,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-        )
-
-        self.load_balancer = alb
-
-        listener = alb.add_listener(
+        listener = self.load_balancer.add_listener(
             f"{self.name}-BackendListener",
             port=443,
             certificates=[self.certificate],
@@ -517,14 +534,14 @@ class GalvBackend(Stack):
             targets=[self.service],
             health_check=HealthCheck(
                 path="/health",
-                port="8000",
-                interval=Duration.seconds(30),
-                timeout=Duration.seconds(5),
+                # port="8000",
+                interval=Duration.seconds(5),
+                timeout=Duration.seconds(2),
                 healthy_threshold_count=2,
-                unhealthy_threshold_count=2,
+                unhealthy_threshold_count=3,
             )
         )
-        alb.add_listener(
+        self.load_balancer.add_listener(
             f"{self.name}-BackendHttpListener",
             port=80,
             open=True,
@@ -544,7 +561,7 @@ class GalvBackend(Stack):
         CfnWebACLAssociation(
             self,
             f"{self.name}-BackendWebACLAssociation",
-            resource_arn=alb.load_balancer_arn,
+            resource_arn=self.load_balancer.load_balancer_arn,
             web_acl_arn=web_acl_backend.attr_arn
         )
 
@@ -556,10 +573,10 @@ class GalvBackend(Stack):
                 f"{self.name}-BackendAliasRecord",
                 zone=zone,
                 record_name=self.fqdn,
-                target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(alb)),
+                target=route53.RecordTarget.from_alias(route53_targets.LoadBalancerTarget(self.load_balancer)),
             )
         else:
-            CfnOutput(self, "BackendCNAME", value=f"{self.fqdn} -> {alb.load_balancer_dns_name}")
+            CfnOutput(self, "BackendCNAME", value=f"{self.fqdn} -> {self.load_balancer.load_balancer_dns_name}")
 
     def _create_setup_task(self):
         """
