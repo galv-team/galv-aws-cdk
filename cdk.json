@@ -11,7 +11,9 @@
     "frontendEnvironment": {},
     "backendEnvironment": {
       "DJANGO_SUPERUSER_USERNAME": "admin",
-      "DJANGO_LOG_LEVEL": "INFO",
+      "DJANGO_LOG_LEVEL": "DEBUG",
+      "DJANGO_LOG_LEVEL_CORE": "DEBUG",
+      "DJANGO_DEBUG":  "True",
       "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "",
       "DJANGO_USER_ACTIVATION_TOKEN_EXPIRY_S": ""
     },

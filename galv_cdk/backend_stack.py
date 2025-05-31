@@ -166,11 +166,13 @@ class GalvBackend(Stack):
             self,
             f"{self.name}-Vpc",
             max_azs=2,
+            cidr="10.0.0.0/16",
             subnet_configuration=[
                 ec2.SubnetConfiguration(
                     name="public",
                     subnet_type=ec2.SubnetType.PUBLIC,
                     map_public_ip_on_launch=False,
+                    cidr_mask=24  # Adjust CIDR mask as needed
                 ),
                 ec2.SubnetConfiguration(
                     name="private",
@@ -407,6 +409,7 @@ class GalvBackend(Stack):
             "FRONTEND_VIRTUAL_HOST": f"https://{self.frontend_fqdn}",
             "PYTHONPATH": "/code/backend_django",
             "DJANGO_ELB_HOST": self.load_balancer.load_balancer_dns_name,
+            "DJANGO_ALLOWED_CIDR_NETS": ",".join(subnet.ipv4_cidr_block for subnet in self.vpc.public_subnets),
             "SECURE_PROXY_SSL_HEADER": "HTTP_X_FORWARDED_PROTO:https",  # tell Django to trust the ALB's forwarded headers
         })
 
@@ -510,7 +513,7 @@ class GalvBackend(Stack):
             desired_count=1,
             min_healthy_percent=50,
             max_healthy_percent=100,
-            health_check_grace_period=Duration.seconds(20),
+            health_check_grace_period=Duration.seconds(60),
             security_groups=[self.backend_sg],
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
             circuit_breaker=ecs.DeploymentCircuitBreaker(
@@ -533,13 +536,14 @@ class GalvBackend(Stack):
             port=8000,
             targets=[self.service],
             health_check=HealthCheck(
-                path="/health",
+                path="/health/",
                 # port="8000",
                 interval=Duration.seconds(5),
                 timeout=Duration.seconds(2),
                 healthy_threshold_count=2,
                 unhealthy_threshold_count=3,
-            )
+            ),
+            deregistration_delay=Duration.seconds(10),
         )
         self.load_balancer.add_listener(
             f"{self.name}-BackendHttpListener",
