@@ -248,6 +248,11 @@ class GalvBackend(Stack):
             ec2.Port.tcp(443),
             "Allow HTTPS from backend service to ECR endpoints"
         )
+        self.vpc_endpoint_sg.add_ingress_rule(
+            ec2.Peer.security_group_id(self.monitor_sg.security_group_id),
+            ec2.Port.tcp(443),
+            "Allow HTTPS from monitor task to ECR endpoints"
+        )
 
     def _create_storage(self):
         """
