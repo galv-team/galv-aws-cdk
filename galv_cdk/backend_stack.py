@@ -558,6 +558,7 @@ class GalvBackend(Stack):
         )
 
         self.bucket.grant_read_write(task_definition.task_role)
+        self.bucket.grant_put_acl(task_definition.task_role)
 
         self.db_instance.connections.allow_default_port_from(self.service)
 
@@ -609,7 +610,7 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
-            command=["/code/setup_db.sh"],
+            command=["/code/setup_db.sh; python manage.py collectstatic --noinput"],
             entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="setup-db",
@@ -620,6 +621,7 @@ class GalvBackend(Stack):
         )
 
         self.bucket.grant_read_write(self.setup_task_def.task_role)
+        self.bucket.grant_put_acl(self.setup_task_def.task_role)
 
         self.db_instance.connections.allow_default_port_from(self.setup_sg)
 

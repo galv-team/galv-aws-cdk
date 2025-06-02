@@ -183,6 +183,7 @@ def _suppress_backend_iams(stack: Stack, name: str):
         "Action::s3:List*",
         "Action::s3:DeleteObject*",
         "Action::s3:PutObject",
+        "Action::s3:PutObjectAcl",
         "Action::s3:PutObjectLegalHold",
         "Action::s3:PutObjectRetention",
         "Action::s3:PutObjectTagging",
@@ -416,6 +417,7 @@ def _suppress_ecs_iam5_wildcards(stack: Stack, name: str):
     applies_to = [
         "Action::s3:GetObject*",
         "Action::s3:PutObject*",
+        "Action::s3:PutObjectAcl",
         f"Resource::arn:aws:s3:::{name}-BackendStorage/*"
     ]
 
