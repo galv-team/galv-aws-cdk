@@ -273,6 +273,11 @@ class GalvBackend(Stack):
             ec2.Port.tcp(443),
             "Allow HTTPS from monitor task to ECR endpoints"
         )
+        self.vpc_endpoint_sg.add_ingress_rule(
+            ec2.Peer.security_group_id(self.setup_sg.security_group_id),
+            ec2.Port.tcp(443),
+            "Allow HTTPS from setup task to VPC endpoints"
+        )
 
     def _create_storage(self):
         """
@@ -621,7 +626,7 @@ class GalvBackend(Stack):
             self,
             f"{self.name}-SetupDbTaskDef",
             cpu=512,
-            memory_limit_mib=1024,
+            memory_limit_mib=1024
         )
 
         log_group = logs.LogGroup(
@@ -638,8 +643,7 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
-            # command=["/code/setup_db.sh; python manage.py collectstatic --noinput"],
-            command=["tail -f /dev/null"],
+            command=["/code/setup_db.sh; python manage.py collectstatic --noinput"],
             entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="setup-db",
@@ -678,7 +682,7 @@ class GalvBackend(Stack):
                             "assignPublicIp": "DISABLED",
                             "securityGroups": [self.setup_sg.security_group_id]
                         }
-                    },
+                    }
                 },
                 physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunSetupTask-{v}"),
             )
