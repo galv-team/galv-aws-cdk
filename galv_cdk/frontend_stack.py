@@ -8,7 +8,7 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_logs as logs,
     aws_iam as iam,
-    aws_s3 as s3, RemovalPolicy, Duration,
+    aws_s3 as s3, RemovalPolicy, Duration, Tags,
 )
 from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
 from aws_cdk.aws_wafv2 import CfnWebACLAssociation
@@ -101,6 +101,7 @@ class GalvFrontend(Stack):
                 domain_name=self.fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )
+            Tags.of(self.certificate).add("project-name", self.name)
         else:
             print(f"Using existing certificate: {certificate_arn}")
             self.certificate = acm.Certificate.from_certificate_arn(
@@ -126,6 +127,7 @@ class GalvFrontend(Stack):
                 ),
             ]
         )
+        Tags.of(vpc).add("project-name", self.name)
         alb_sg = ec2.SecurityGroup(
             self,
             f"{self.name}-FrontendALBSecurityGroup",
@@ -191,6 +193,7 @@ class GalvFrontend(Stack):
             container_insights_v2=
             ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED,
         )
+        Tags.of(cluster).add("project-name", self.name)
 
         if not enable_insights:
             NagSuppressions.add_resource_suppressions(

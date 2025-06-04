@@ -26,6 +26,7 @@ from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from aws_cdk.custom_resources import AwsCustomResource, AwsSdkCall, PhysicalResourceId, AwsCustomResourcePolicy
 from cdk_nag import NagSuppressions
 from constructs import Construct
+from datetime import datetime, timezone
 
 from nag_supressions import suppress_nags_pre_synth
 from utils import get_aws_custom_cert_instructions, inject_protected_env, create_waf_scope_web_acl
@@ -113,6 +114,7 @@ class GalvBackend(Stack):
                 domain_name=self.fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )
+            Tags.of(self.certificate).add("project-name", self.name)
         else:
             print(f"Using existing certificate: {self.certificate_arn}")
             self.certificate = acm.Certificate.from_certificate_arn(self, f"{self.name}-BackendCertificate",
@@ -189,7 +191,10 @@ class GalvBackend(Stack):
                     destination=ec2.FlowLogDestination.to_s3(self.log_bucket)
                 )
             },
+            enable_dns_hostnames=True,
+            enable_dns_support=True,
         )
+        Tags.of(self.vpc).add("project-name", self.name)
 
         # Add interface endpoints for private access to AWS services
         self.vpc_endpoint_sg = ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
@@ -206,6 +211,7 @@ class GalvBackend(Stack):
             "CloudWatchLogsEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
             security_groups=[self.vpc_endpoint_sg],
+            private_dns_enabled=True,
             subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
         )
 
@@ -221,6 +227,20 @@ class GalvBackend(Stack):
             service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
             subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[self.vpc_endpoint_sg],
+        )
+
+        # Allow services to access STS for IAM role assumption
+        self.vpc.add_interface_endpoint(
+            "StsEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.STS,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[self.vpc_endpoint_sg]
+        )
+
+        self.vpc.add_gateway_endpoint(
+            "S3Endpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+            subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
         )
 
     def _create_security_groups(self):
@@ -287,6 +307,15 @@ class GalvBackend(Stack):
                 ],
                 conditions={"Bool": {"aws:SecureTransport": "false"}}
             )
+        )
+        self.bucket.add_cors_rule(
+            allowed_methods=[
+                s3.HttpMethods.GET,
+                s3.HttpMethods.HEAD,
+            ],
+            allowed_origins=[f"https://{self.fqdn}"],  # or restrict to your domains
+            allowed_headers=["*"],
+            max_age=3000,
         )
         self.bucket.node.add_dependency(self.kms_key)
 
@@ -459,6 +488,7 @@ class GalvBackend(Stack):
             container_insights_v2=
             ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED,
         )
+        Tags.of(self.cluster).add("project-name", self.name)
 
         if not enable_insights:
             NagSuppressions.add_resource_suppressions(
@@ -484,13 +514,7 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
-            # working_directory="/code/backend_django",
             command=["gunicorn --bind 0.0.0.0:8000 config.wsgi"],
-            # command=[
-            #     "python", "-c",
-            #     "import sys, os; print('CWD:', os.getcwd()); print('PYTHONPATH:', sys.path); import config.wsgi; print('WSGI loaded')"
-            # ],
-            # command=["tail -f /dev/null"],
             entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix=f"{self.name}-BackendService",
@@ -542,7 +566,6 @@ class GalvBackend(Stack):
             targets=[self.service],
             health_check=HealthCheck(
                 path="/health/",
-                # port="8000",
                 interval=Duration.seconds(5),
                 timeout=Duration.seconds(2),
                 healthy_threshold_count=2,
@@ -598,7 +621,7 @@ class GalvBackend(Stack):
             self,
             f"{self.name}-SetupDbTaskDef",
             cpu=512,
-            memory_limit_mib=1024
+            memory_limit_mib=1024,
         )
 
         log_group = logs.LogGroup(
@@ -615,7 +638,8 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
-            command=["/code/setup_db.sh; python manage.py collectstatic --noinput"],
+            # command=["/code/setup_db.sh; python manage.py collectstatic --noinput"],
+            command=["tail -f /dev/null"],
             entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="setup-db",
@@ -628,12 +652,20 @@ class GalvBackend(Stack):
         self.bucket.grant_read_write(self.setup_task_def.task_role)
         self.bucket.grant_put_acl(self.setup_task_def.task_role)
 
+        self.setup_task_def.task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"]
+            )
+        )
+
         self.db_instance.connections.allow_default_port_from(self.setup_sg)
 
-        self.setup_task = AwsCustomResource(
-            self,
-            f"{self.name}-RunSetupTask",
-            on_create=AwsSdkCall(
+        v = self.backend_version
+        if v == "latest":
+            v = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+        run_task = AwsSdkCall(
                 service="ECS",
                 action="runTask",
                 parameters={
@@ -646,10 +678,16 @@ class GalvBackend(Stack):
                             "assignPublicIp": "DISABLED",
                             "securityGroups": [self.setup_sg.security_group_id]
                         }
-                    }
+                    },
                 },
-                physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunSetupTask")
-            ),
+                physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunSetupTask-{v}"),
+            )
+
+        self.setup_task = AwsCustomResource(
+            self,
+            f"{self.name}-RunSetupTask",
+            on_create=run_task,
+            on_update=run_task,
             policy=AwsCustomResourcePolicy.from_statements([
                 iam.PolicyStatement(
                     actions=["ecs:RunTask", "iam:PassRole"],

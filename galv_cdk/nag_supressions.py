@@ -326,6 +326,15 @@ def _suppress_ecs_env_vars(stack: Stack, name: str):
     setup = backend.node.find_child(f"{name}-SetupDbTaskDef")
     NagSuppressions.add_resource_suppressions(
         setup,
+        [{
+            "id": "AwsSolutions-IAM5",
+            "reason": "sts:GetCallerIdentity does not support resource-level permissions; must use wildcard"
+        }],
+        apply_to_children=True
+    )
+
+    NagSuppressions.add_resource_suppressions(
+        setup,
         [{"id": "AwsSolutions-ECS2", "reason": reason}]
     )
 
