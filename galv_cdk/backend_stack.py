@@ -3,7 +3,7 @@ import string
 from secrets import choice
 
 from aws_cdk import (
-    aws_ec2 as ec2,
+    aws_ec2,
     aws_ecr as ecr,
     aws_ecs as ecs,
     aws_s3 as s3,
@@ -164,31 +164,31 @@ class GalvBackend(Stack):
         """
 
         # ==== Shared VPC ====
-        self.vpc = ec2.Vpc(
+        self.vpc = aws_ec2.Vpc(
             self,
             f"{self.name}-Vpc",
             max_azs=2,
             cidr="10.0.0.0/16",
             subnet_configuration=[
-                ec2.SubnetConfiguration(
+                aws_ec2.SubnetConfiguration(
                     name="public",
-                    subnet_type=ec2.SubnetType.PUBLIC,
+                    subnet_type=aws_ec2.SubnetType.PUBLIC,
                     map_public_ip_on_launch=False,
                     cidr_mask=24  # Adjust CIDR mask as needed
                 ),
-                ec2.SubnetConfiguration(
+                aws_ec2.SubnetConfiguration(
                     name="private",
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS,
                 ),
-                ec2.SubnetConfiguration(
+                aws_ec2.SubnetConfiguration(
                     name="isolated",
-                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                    subnet_type=aws_ec2.SubnetType.PRIVATE_ISOLATED,
                 )
             ],
             nat_gateways=0,  # Avoid NAT gateway charges
             flow_logs={
-                "AllTraffic": ec2.FlowLogOptions(
-                    destination=ec2.FlowLogDestination.to_s3(self.log_bucket)
+                "AllTraffic": aws_ec2.FlowLogOptions(
+                    destination=aws_ec2.FlowLogDestination.to_s3(self.log_bucket)
                 )
             },
             enable_dns_hostnames=True,
@@ -196,86 +196,90 @@ class GalvBackend(Stack):
         )
         Tags.of(self.vpc).add("project-name", self.name)
 
+        for subnet in self.vpc.private_subnets:
+            Tags.of(subnet).add("AZ", subnet.availability_zone)
+
         # Add interface endpoints for private access to AWS services
-        self.vpc_endpoint_sg = ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
-        self.vpc_endpoint_sg.add_ingress_rule(ec2.Peer.ipv4(self.vpc.vpc_cidr_block), ec2.Port.tcp(443), "HTTPS from VPC")
+        self.vpc_endpoint_sg = aws_ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
+        self.vpc_endpoint_sg.add_ingress_rule(aws_ec2.Peer.ipv4(self.vpc.vpc_cidr_block), aws_ec2.Port.tcp(443), "HTTPS from VPC")
 
         self.vpc.add_interface_endpoint(
             "SecretsManagerEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+            service=aws_ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
             security_groups=[self.vpc_endpoint_sg],
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS)
         )
 
         self.vpc.add_interface_endpoint(
             "CloudWatchLogsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+            service=aws_ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
             security_groups=[self.vpc_endpoint_sg],
             private_dns_enabled=True,
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS)
         )
 
         self.vpc.add_interface_endpoint(
             "EcrApiEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.ECR,
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            service=aws_ec2.InterfaceVpcEndpointAwsService.ECR,
+            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[self.vpc_endpoint_sg],
         )
 
         self.vpc.add_interface_endpoint(
             "EcrDockerEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            service=aws_ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[self.vpc_endpoint_sg],
         )
 
         # Allow services to access STS for IAM role assumption
         self.vpc.add_interface_endpoint(
             "StsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.STS,
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            service=aws_ec2.InterfaceVpcEndpointAwsService.STS,
+            private_dns_enabled=True,
+            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[self.vpc_endpoint_sg]
         )
 
         self.vpc.add_gateway_endpoint(
             "S3Endpoint",
-            service=ec2.GatewayVpcEndpointAwsService.S3,
-            subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
+            service=aws_ec2.GatewayVpcEndpointAwsService.S3,
+            subnets=[aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS)],
         )
 
     def _create_security_groups(self):
         """
         Create security groups for the ALB, backend service, database, and endpoint.
         """
-        self.alb_sg = ec2.SecurityGroup(self, f"{self.name}-ALBSG", vpc=self.vpc)
-        self.backend_sg = ec2.SecurityGroup(self, f"{self.name}-BackendServiceSG", vpc=self.vpc)
-        self.db_sg = ec2.SecurityGroup(self, f"{self.name}-DBSG", vpc=self.vpc)
-        self.setup_sg = ec2.SecurityGroup(self, f"{self.name}-SetupTaskSG", vpc=self.vpc)
-        self.monitor_sg = ec2.SecurityGroup(self, f"{self.name}-ValidationMonitorSG", vpc=self.vpc)
-        self.lambda_sg = ec2.SecurityGroup(self, f"{self.name}-LambdaSG", vpc=self.vpc)
+        self.alb_sg = aws_ec2.SecurityGroup(self, f"{self.name}-ALBSG", vpc=self.vpc)
+        self.backend_sg = aws_ec2.SecurityGroup(self, f"{self.name}-BackendServiceSG", vpc=self.vpc)
+        self.db_sg = aws_ec2.SecurityGroup(self, f"{self.name}-DBSG", vpc=self.vpc)
+        self.setup_sg = aws_ec2.SecurityGroup(self, f"{self.name}-SetupTaskSG", vpc=self.vpc)
+        self.monitor_sg = aws_ec2.SecurityGroup(self, f"{self.name}-ValidationMonitorSG", vpc=self.vpc)
+        self.lambda_sg = aws_ec2.SecurityGroup(self, f"{self.name}-LambdaSG", vpc=self.vpc)
 
-        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP from internet")
-        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "HTTPS from internet")
-        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv6(), ec2.Port.tcp(80), "HTTP from internet")
-        self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv6(), ec2.Port.tcp(443), "HTTPS from internet")
-        self.backend_sg.add_ingress_rule(self.alb_sg, ec2.Port.tcp(8000), "Traffic from ALB")
-        self.db_sg.add_ingress_rule(self.backend_sg, ec2.Port.tcp(5432), "Postgres from backend service")
-        self.db_sg.add_ingress_rule(self.setup_sg, ec2.Port.tcp(5432), "Postgres from setup task")
-        self.db_sg.add_ingress_rule(self.monitor_sg, ec2.Port.tcp(5432), "Postgres from monitor task")
+        self.alb_sg.add_ingress_rule(aws_ec2.Peer.any_ipv4(), aws_ec2.Port.tcp(80), "HTTP from internet")
+        self.alb_sg.add_ingress_rule(aws_ec2.Peer.any_ipv4(), aws_ec2.Port.tcp(443), "HTTPS from internet")
+        self.alb_sg.add_ingress_rule(aws_ec2.Peer.any_ipv6(), aws_ec2.Port.tcp(80), "HTTP from internet")
+        self.alb_sg.add_ingress_rule(aws_ec2.Peer.any_ipv6(), aws_ec2.Port.tcp(443), "HTTPS from internet")
+        self.backend_sg.add_ingress_rule(self.alb_sg, aws_ec2.Port.tcp(8000), "Traffic from ALB")
+        self.db_sg.add_ingress_rule(self.backend_sg, aws_ec2.Port.tcp(5432), "Postgres from backend service")
+        self.db_sg.add_ingress_rule(self.setup_sg, aws_ec2.Port.tcp(5432), "Postgres from setup task")
+        self.db_sg.add_ingress_rule(self.monitor_sg, aws_ec2.Port.tcp(5432), "Postgres from monitor task")
 
         self.vpc_endpoint_sg.add_ingress_rule(
-            ec2.Peer.security_group_id(self.backend_sg.security_group_id),
-            ec2.Port.tcp(443),
+            aws_ec2.Peer.security_group_id(self.backend_sg.security_group_id),
+            aws_ec2.Port.tcp(443),
             "Allow HTTPS from backend service to ECR endpoints"
         )
         self.vpc_endpoint_sg.add_ingress_rule(
-            ec2.Peer.security_group_id(self.monitor_sg.security_group_id),
-            ec2.Port.tcp(443),
+            aws_ec2.Peer.security_group_id(self.monitor_sg.security_group_id),
+            aws_ec2.Port.tcp(443),
             "Allow HTTPS from monitor task to ECR endpoints"
         )
         self.vpc_endpoint_sg.add_ingress_rule(
-            ec2.Peer.security_group_id(self.setup_sg.security_group_id),
-            ec2.Port.tcp(443),
+            aws_ec2.Peer.security_group_id(self.setup_sg.security_group_id),
+            aws_ec2.Port.tcp(443),
             "Allow HTTPS from setup task to VPC endpoints"
         )
 
@@ -344,10 +348,10 @@ class GalvBackend(Stack):
             ),
             storage_encrypted=True,
             vpc=self.vpc,
-            vpc_subnets=ec2.SubnetSelection(subnet_group_name="isolated"),
+            vpc_subnets=aws_ec2.SubnetSelection(subnet_group_name="isolated"),
             security_groups=[self.db_sg],
-            instance_type=ec2.InstanceType.of(
-                ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO
+            instance_type=aws_ec2.InstanceType.of(
+                aws_ec2.InstanceClass.BURSTABLE3, aws_ec2.InstanceSize.MICRO
             ),
             publicly_accessible=False,
             allocated_storage=20,
@@ -392,7 +396,7 @@ class GalvBackend(Stack):
             vpc=self.vpc,
             internet_facing=True,
             security_group=self.alb_sg,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            vpc_subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PUBLIC),
         )
         alb.log_access_logs(
             bucket=self.log_bucket,
@@ -552,7 +556,7 @@ class GalvBackend(Stack):
             max_healthy_percent=100,
             health_check_grace_period=Duration.seconds(60),
             security_groups=[self.backend_sg],
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            vpc_subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PUBLIC),
             circuit_breaker=ecs.DeploymentCircuitBreaker(
                 rollback=True,
                 enable=True
@@ -683,22 +687,22 @@ class GalvBackend(Stack):
             v = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
         run_task = AwsSdkCall(
-                service="ECS",
-                action="runTask",
-                parameters={
-                    "cluster": self.cluster.cluster_name,
-                    "launchType": "FARGATE",
-                    "taskDefinition": self.setup_task_def.task_definition_arn,
-                    "networkConfiguration": {
-                        "awsvpcConfiguration": {
-                            "subnets": [subnet.subnet_id for subnet in self.vpc.select_subnets(subnet_group_name="private").subnets],
-                            "assignPublicIp": "DISABLED",
-                            "securityGroups": [self.setup_sg.security_group_id]
-                        }
+            service="ECS",
+            action="runTask",
+            parameters={
+                "cluster": self.cluster.cluster_name,
+                "launchType": "FARGATE",
+                "taskDefinition": self.setup_task_def.task_definition_arn,
+                "networkConfiguration": {
+                    "awsvpcConfiguration": {
+                        "subnets": [subnet.subnet_id for subnet in self.vpc.select_subnets(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS).subnets],
+                        "assignPublicIp": "DISABLED",
+                        "securityGroups": [self.setup_sg.security_group_id]
                     }
-                },
-                physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunSetupTask-{v}"),
-            )
+                }
+            },
+            physical_resource_id=PhysicalResourceId.of(f"{self.name}-RunSetupTask-{v}"),
+        )
 
         self.setup_task = AwsCustomResource(
             self,
@@ -780,7 +784,7 @@ class GalvBackend(Stack):
                     targets.EcsTask(
                         cluster=self.cluster,
                         task_definition=self.monitor_task_def,
-                        subnet_selection=ec2.SubnetSelection(subnet_group_name="private"),
+                        subnet_selection=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
                         security_groups=[self.monitor_sg]
                     )
                 ]
