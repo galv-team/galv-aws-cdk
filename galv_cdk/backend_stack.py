@@ -450,6 +450,9 @@ class GalvBackend(Stack):
             "DJANGO_ELB_HOST": self.load_balancer.load_balancer_dns_name,
             "DJANGO_ALLOWED_CIDR_NETS": ",".join(subnet.ipv4_cidr_block for subnet in self.vpc.public_subnets),
             "SECURE_PROXY_SSL_HEADER": "HTTP_X_FORWARDED_PROTO:https",  # tell Django to trust the ALB's forwarded headers
+            "AWS_DEFAULT_REGION": self.stack.region,
+            "AWS_REGION": self.stack.region,
+            "AWS_STS_REGIONAL_ENDPOINTS": "regional",  # use regional STS endpoints because our VPC endpoints are regional
         })
 
         secrets_name = self.node.try_get_context("backendSecretsName")
@@ -643,14 +646,24 @@ class GalvBackend(Stack):
                 repository=self.repo,
                 tag=self.backend_version
             ),
-            command=["/code/setup_db.sh; python manage.py collectstatic --noinput"],
+            command=[(
+                "echo make; "
+                "python3 manage.py makemigrations --no-input; "
+                "echo migrate; "
+                "python3 manage.py migrate --no-input;echo superuser; "
+                "python3 manage.py create_superuser --no-input; "
+                "echo fixtures; "
+                "python3 manage.py loaddata galv/fixtures/*; "
+                "echo static; "
+                "python3 manage.py collectstatic --noinput"
+            )],
             entry_point=["/bin/sh", "-c"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="setup-db",
                 log_group=log_group,
             ),
             environment=self.env_vars,
-            secrets=self.secrets
+            secrets=self.secrets,
         )
 
         self.bucket.grant_read_write(self.setup_task_def.task_role)
