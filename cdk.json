@@ -3,7 +3,7 @@
   "context": {
     "name": "galv-test",
     "mailFromDomain": "oxrse.uk",
-    "mailFromUser": "galv-no-reply@oxrse.uk",
+    "mailFromUser": "galv-no-reply",
     "projectNameTag": "galv-test",
     "backendVersion": "latest",
     "frontendVersion": "latest",
