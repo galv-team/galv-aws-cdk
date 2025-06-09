@@ -380,8 +380,6 @@ class GalvBackend(Stack):
                 ),
                 viewer_certificate=aws_cloudfront.CfnDistribution.ViewerCertificateProperty(
                     cloud_front_default_certificate=True,
-                    minimum_protocol_version="TLSv1.2_2021",
-                    ssl_support_method="sni-only"
                 )
             ),
         )
@@ -627,8 +625,8 @@ class GalvBackend(Stack):
             cluster=self.cluster,
             task_definition=task_definition,
             desired_count=1,
-            min_healthy_percent=50,
-            max_healthy_percent=100,
+            min_healthy_percent=100,
+            max_healthy_percent=200,
             health_check_grace_period=Duration.seconds(60),
             security_groups=[self.backend_sg],
             vpc_subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PUBLIC),
