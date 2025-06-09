@@ -262,7 +262,9 @@ class TestGalvBackend(unittest.TestCase):
         self.template.has_resource_properties("AWS::ECS::TaskDefinition", {
             "ContainerDefinitions": Match.array_with([
                 Match.object_like({
-                    "Command": ["/code/setup_db.sh"]
+                    "Command": Match.array_with([
+                        Match.string_like_regexp(".*collectstatic.*")
+                    ])
                 })
             ])
         })

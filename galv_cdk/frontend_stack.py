@@ -54,6 +54,8 @@ class GalvFrontend(Stack):
 
         suppress_nags_pre_synth(self)
 
+        Tags.of(self).add("project-name", self.project_tag)
+
     def _update_log_bucket_access(self):
         """
         Create an S3 Bucket for storing logs.
@@ -104,7 +106,7 @@ class GalvFrontend(Stack):
                 domain_name=self.fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )
-            Tags.of(self.certificate).add("project-name", self.name)
+            Tags.of(self.certificate).add("project-name", self.project_tag)
         else:
             print(f"Using existing certificate: {certificate_arn}")
             self.certificate = acm.Certificate.from_certificate_arn(
@@ -130,7 +132,7 @@ class GalvFrontend(Stack):
                 ),
             ]
         )
-        Tags.of(vpc).add("project-name", self.name)
+        Tags.of(vpc).add("project-name", self.project_tag)
         alb_sg = ec2.SecurityGroup(
             self,
             f"{self.name}-FrontendALBSecurityGroup",
@@ -196,7 +198,7 @@ class GalvFrontend(Stack):
             container_insights_v2=
             ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED,
         )
-        Tags.of(cluster).add("project-name", self.name)
+        Tags.of(cluster).add("project-name", self.project_tag)
 
         if not enable_insights:
             NagSuppressions.add_resource_suppressions(

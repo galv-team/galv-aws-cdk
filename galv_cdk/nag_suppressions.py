@@ -33,6 +33,7 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_rds_nags(stack, name)
         _suppress_alb_attributes(stack, name)
         _suppress_lambda_resource(stack)
+        _suppress_distribution(stack, name)
     except Exception as e:
         raise InapplicableSuppressionError("Failed to apply pre-synth suppressions") from e
 
@@ -146,6 +147,32 @@ def _suppress_backend_bucket(stack: Stack, name: str):
                 "id": "HIPAA.Security-S3BucketReplicationEnabled",
                 "reason": "Data replication is handled externally or not required"
             }
+        ]
+    )
+    static_bucket = backend.node.find_child(f"{name}-StaticAssetsBucket")
+    NagSuppressions.add_resource_suppressions(
+        static_bucket,
+        [
+            {
+                "id": "AwsSolutions-S1",
+                "reason": "Requests don't hit S3 directly. S3 access logs are rarely useful in this scenario and expensive to store"
+            },
+            {
+                "id": "HIPAA.Security-S3BucketLoggingEnabled",
+                "reason": "Requests don't hit S3 directly. S3 access logs are rarely useful in this scenario and expensive to store"
+            },
+            {
+                "id": "HIPAA.Security-S3BucketVersioningEnabled",
+                "reason": "Static assets are immutable; versioning is not required"
+            },
+            {
+                "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                "reason": "Replication is unnecessary for public static files served via CDN"
+            },
+            {
+                "id": "HIPAA.Security-S3DefaultEncryptionKMS",
+                "reason": "Public static assets do not require customer-managed keys"
+            },
         ]
     )
 
@@ -697,5 +724,32 @@ def _suppress_frontend(stack: Stack, name: str):
                 "id": "HIPAA.Security-CloudWatchLogGroupEncrypted",
                 "reason": "Log group is not encrypted; ALB access logs are not encrypted either"
             },
+        ]
+    )
+
+def _suppress_distribution(stack: Stack, name: str):
+    if stack.__class__.__name__ != "GalvBackend":
+        return
+
+    distribution = stack.node.find_child(f"{name}-StaticAssetsCDN")
+    NagSuppressions.add_resource_suppressions(
+        distribution,
+        [
+            {
+                "id": "AwsSolutions-CFR1",
+                "reason": "No geographic restrictions required for public frontend assets"
+            },
+            {
+                "id": "AwsSolutions-CFR2",
+                "reason": "Static CDN content is not dynamic or user-targeted; WAF not necessary"
+            },
+            {
+                "id": "AwsSolutions-CFR3",
+                "reason": "Static content CDN does not require access-level tracking; abuse is unlikely and content is public"
+            },
+            {
+                "id": "AwsSolutions-CFR4",
+                "reason": "Suppressed because this is set by the viewer_certificate in the distribution",
+            }
         ]
     )

@@ -18,7 +18,7 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_route53_targets as route53_targets,
     aws_certificatemanager as acm,
-    Stack, CfnOutput, Duration, Token, Tags
+    Stack, CfnOutput, Duration, Token, Tags, aws_cloudfront, aws_cloudfront_origins
 )
 from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
 from aws_cdk.aws_s3 import IBucket
@@ -36,7 +36,7 @@ class GalvBackend(Stack):
     def __init__(self, scope: Construct, construct_id: str, log_bucket: IBucket, certificate_arn: str = None, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        project_tag = self.node.try_get_context("projectNameTag") or "galv"
+        self.project_tag = self.node.try_get_context("projectNameTag") or "galv"
         self.name = self.node.try_get_context("name") or "galv"
         self.is_production = self.node.try_get_context("isProduction")
         if self.is_production is None:
@@ -89,6 +89,7 @@ class GalvBackend(Stack):
 
         self._create_security_groups()
         self._create_storage()
+        self._create_cloudfront_distribution()
         self._create_database()
         self._create_loadbalancer()
         self._setup_environment()
@@ -98,7 +99,7 @@ class GalvBackend(Stack):
 
         self._delayed_tasks()
 
-        Tags.of(self).add("project-name", project_tag)
+        Tags.of(self).add("project-name", self.project_tag)
 
         suppress_nags_pre_synth(self)
 
@@ -116,11 +117,11 @@ class GalvBackend(Stack):
                 domain_name=self.fqdn,
                 validation=acm.CertificateValidation.from_dns(zone),
             )
-            Tags.of(self.certificate).add("project-name", self.name)
         else:
             print(f"Using existing certificate: {self.certificate_arn}")
             self.certificate = acm.Certificate.from_certificate_arn(self, f"{self.name}-BackendCertificate",
                                                                     self.certificate_arn)
+        Tags.of(self.certificate).add("project-name", self.project_tag)
 
     def _update_log_bucket_access(self):
         """
@@ -170,7 +171,7 @@ class GalvBackend(Stack):
             self,
             f"{self.name}-Vpc",
             max_azs=2,
-            cidr="10.0.0.0/16",
+            ip_addresses=aws_ec2.IpAddresses.cidr("10.0.0.0/16"),
             subnet_configuration=[
                 aws_ec2.SubnetConfiguration(
                     name="public",
@@ -196,7 +197,7 @@ class GalvBackend(Stack):
             enable_dns_hostnames=True,
             enable_dns_support=True,
         )
-        Tags.of(self.vpc).add("project-name", self.name)
+        Tags.of(self.vpc).add("project-name", self.project_tag)
 
         for subnet in self.vpc.private_subnets:
             Tags.of(subnet).add("AZ", subnet.availability_zone)
@@ -289,7 +290,7 @@ class GalvBackend(Stack):
         """
         Create an S3 bucket for backend storage. Used for media and data files.
         """
-        self.bucket = s3.Bucket(
+        self.media_bucket = s3.Bucket(
             self,
             f"{self.name}-BackendStorage",
             removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
@@ -307,19 +308,19 @@ class GalvBackend(Stack):
             server_access_logs_bucket=self.log_bucket,
             server_access_logs_prefix=f"{self.name}-BackendStorage-access-logs"
         )
-        self.bucket.add_to_resource_policy(
+        self.media_bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 actions=["s3:*"],
                 effect=iam.Effect.DENY,
                 principals=[iam.StarPrincipal()],
                 resources=[
-                    self.bucket.bucket_arn,
-                    self.bucket.arn_for_objects("*")
+                    self.media_bucket.bucket_arn,
+                    self.media_bucket.arn_for_objects("*")
                 ],
                 conditions={"Bool": {"aws:SecureTransport": "false"}}
             )
         )
-        self.bucket.add_cors_rule(
+        self.media_bucket.add_cors_rule(
             allowed_methods=[
                 s3.HttpMethods.GET,
                 s3.HttpMethods.HEAD,
@@ -328,7 +329,77 @@ class GalvBackend(Stack):
             allowed_headers=["*"],
             max_age=3000,
         )
-        self.bucket.node.add_dependency(self.kms_key)
+        self.media_bucket.node.add_dependency(self.kms_key)
+
+        self.static_assets_bucket = s3.Bucket(
+            self,
+            f"{self.name}-StaticAssetsBucket",
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+        )
+
+    def _create_cloudfront_distribution(self):
+        oac = aws_cloudfront.CfnOriginAccessControl(
+            self,
+            f"{self.name}-StaticOAC",
+            origin_access_control_config=aws_cloudfront.CfnOriginAccessControl.OriginAccessControlConfigProperty(
+                name=f"{self.name}-StaticCDN-OAC",
+                origin_access_control_origin_type="s3",
+                signing_behavior="always",
+                signing_protocol="sigv4",
+                description="OAC for Django static files CDN",
+            ),
+        )
+
+        self.static_assets_distribution = aws_cloudfront.CfnDistribution(
+            self,
+            f"{self.name}-StaticAssetsCDN",
+            distribution_config=aws_cloudfront.CfnDistribution.DistributionConfigProperty(
+                enabled=True,
+                default_root_object="index.html",
+                origins=[
+                    aws_cloudfront.CfnDistribution.OriginProperty(
+                        id=f"{self.name}-StaticAssetsOrigin",
+                        domain_name=self.static_assets_bucket.bucket_regional_domain_name,
+                        s3_origin_config=aws_cloudfront.CfnDistribution.S3OriginConfigProperty(
+                            origin_access_identity=""
+                        ),
+                        origin_access_control_id=oac.ref,
+                    )
+                ],
+                default_cache_behavior=aws_cloudfront.CfnDistribution.DefaultCacheBehaviorProperty(
+                    target_origin_id=f"{self.name}-StaticAssetsOrigin",
+                    viewer_protocol_policy="redirect-to-https",
+                    allowed_methods=["GET", "HEAD"],
+                    cached_methods=["GET", "HEAD"],
+                    compress=True,
+                    cache_policy_id=aws_cloudfront.CachePolicy.CACHING_OPTIMIZED.cache_policy_id,
+                ),
+                viewer_certificate=aws_cloudfront.CfnDistribution.ViewerCertificateProperty(
+                    cloud_front_default_certificate=True,
+                    minimum_protocol_version="TLSv1.2_2021",
+                    ssl_support_method="sni-only"
+                )
+            ),
+        )
+
+        self.static_assets_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[self.static_assets_bucket.arn_for_objects("*")],
+                principals=[iam.ServicePrincipal("cloudfront.amazonaws.com")],
+                conditions={
+                    "StringEquals": {
+                        "AWS:SourceArn": f"arn:aws:cloudfront::{self.account}:distribution/{self.static_assets_distribution.ref}"
+                    }
+                },
+            )
+        )
+
+        CfnOutput(self, "StaticAssetsCDN", value=f"https://{self.static_assets_distribution.attr_domain_name}")
 
     def _create_database(self):
         """
@@ -444,7 +515,7 @@ class GalvBackend(Stack):
             "DJANGO_EMAIL_USE_SSL": "False",
             "DJANGO_DEFAULT_FROM_EMAIL": sender_address,
             "DJANGO_AWS_S3_REGION_NAME": self.stack.region,
-            "DJANGO_AWS_STORAGE_BUCKET_NAME": self.bucket.bucket_name,
+            "DJANGO_AWS_STORAGE_BUCKET_NAME": self.media_bucket.bucket_name,
             "DJANGO_STORE_MEDIA_FILES_ON_S3": "True",
             "DJANGO_STORE_STATIC_FILES_ON_S3": "True",
             "DJANGO_LABS_USE_OUR_S3_STORAGE": "True",
@@ -459,6 +530,8 @@ class GalvBackend(Stack):
             "AWS_DEFAULT_REGION": self.stack.region,
             "AWS_REGION": self.stack.region,
             "AWS_STS_REGIONAL_ENDPOINTS": "regional",  # use regional STS endpoints because our VPC endpoints are regional
+            "DJANGO_STATIC_FILES_BUCKET_NAME": self.static_assets_bucket.bucket_name,
+            "DJANGO_STATIC_FILES_CDN_DOMAIN": self.static_assets_distribution.attr_domain_name,
         })
 
         secrets_name = self.node.try_get_context("backendSecretsName")
@@ -502,7 +575,7 @@ class GalvBackend(Stack):
             container_insights_v2=
             ecs.ContainerInsights.ENABLED if enable_insights else ecs.ContainerInsights.DISABLED,
         )
-        Tags.of(self.cluster).add("project-name", self.name)
+        Tags.of(self.cluster).add("project-name", self.project_tag)
 
         if not enable_insights:
             NagSuppressions.add_resource_suppressions(
@@ -537,7 +610,7 @@ class GalvBackend(Stack):
             environment={
                 **self.env_vars,
                 "ENVIRONMENT": self.name,
-                "S3_BUCKET": self.bucket.bucket_name,
+                "S3_BUCKET": self.media_bucket.bucket_name,
             },
             secrets=self.secrets if self.secrets else None,
             port_mappings=[
@@ -599,8 +672,8 @@ class GalvBackend(Stack):
             )
         )
 
-        self.bucket.grant_read_write(task_definition.task_role)
-        self.bucket.grant_put_acl(task_definition.task_role)
+        self.media_bucket.grant_read_write(task_definition.task_role)
+        self.media_bucket.grant_put_acl(task_definition.task_role)
 
         self.db_instance.connections.allow_default_port_from(self.service)
 
@@ -672,8 +745,8 @@ class GalvBackend(Stack):
             secrets=self.secrets,
         )
 
-        self.bucket.grant_read_write(self.setup_task_def.task_role)
-        self.bucket.grant_put_acl(self.setup_task_def.task_role)
+        self.static_assets_bucket.grant_read_write(self.setup_task_def.task_role)
+        self.static_assets_bucket.grant_put_acl(self.setup_task_def.task_role)
 
         self.setup_task_def.task_role.add_to_policy(
             iam.PolicyStatement(
@@ -773,7 +846,7 @@ class GalvBackend(Stack):
             secrets=self.secrets
         )
 
-        self.bucket.grant_read_write(self.monitor_task_def.task_role)
+        self.media_bucket.grant_read_write(self.monitor_task_def.task_role)
 
         self.db_instance.connections.allow_default_port_from(self.monitor_sg)
 
