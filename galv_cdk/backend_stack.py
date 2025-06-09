@@ -488,23 +488,21 @@ class GalvBackend(Stack):
 
         sender_address = f"{email_user}@{email_domain}"
 
-        smtp_secret = sm.Secret(
-            self,
-            f"{self.name}-SmtpSecret",
-            secret_name=f"{self.name}-smtp",
-            generate_secret_string=sm.SecretStringGenerator(
-                secret_string_template=json.dumps({
-                    "DJANGO_EMAIL_HOST_USER": sender_address
-                }),
-                generate_string_key="DJANGO_EMAIL_HOST_PASSWORD",
-                exclude_punctuation=True
+        smtp_secret_name = self.node.try_get_context("smtpSecretName") or f"{self.name}-smtp"
+        try:
+            smtp_secret = sm.Secret.from_secret_name_v2(
+                self, f"{self.name}-SmtpSecret", secret_name=smtp_secret_name
             )
-        )
 
-        self.secrets.update({
-            "DJANGO_EMAIL_HOST_USER": ecs.Secret.from_secrets_manager(smtp_secret, field="DJANGO_EMAIL_HOST_USER"),
-            "DJANGO_EMAIL_HOST_PASSWORD": ecs.Secret.from_secrets_manager(smtp_secret, field="DJANGO_EMAIL_HOST_PASSWORD"),
-        })
+            self.secrets.update({
+                "DJANGO_EMAIL_HOST_USER": ecs.Secret.from_secrets_manager(smtp_secret, field="DJANGO_EMAIL_HOST_USER"),
+                "DJANGO_EMAIL_HOST_PASSWORD": ecs.Secret.from_secrets_manager(smtp_secret, field="DJANGO_EMAIL_HOST_PASSWORD"),
+            })
+        except Exception as e:
+            raise ValueError(
+                f"SMTP credentials secret not found. Please create the secret named '{smtp_secret_name}' "
+                f"with required keys DJANGO_EMAIL_HOST_USER and DJANGO_EMAIL_HOST_PASSWORD."
+            ) from e
 
         inject_protected_env(self.env_vars, {
             "DJANGO_EMAIL_HOST": f"email-smtp.{self.stack.region}.amazonaws.com",

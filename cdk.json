@@ -21,6 +21,7 @@
     "frontendSecretsKeys": [],
     "backendSecretsName": "galv-backend-secrets",
     "backendSecretsKeys": [],
+    "smtpSecretName": "",
     "monitorIntervalMinutes": 5,
     "frontendSubdomain": "galv-test-app",
     "backendSubdomain": "galv-test-api",
