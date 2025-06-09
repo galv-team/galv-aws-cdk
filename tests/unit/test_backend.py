@@ -2,7 +2,7 @@
 from aws_cdk.aws_s3 import Bucket
 
 import _nvm_hack
-from nag_supressions import suppress_nags_post_synth
+from nag_suppressions import suppress_nags_post_synth
 from log_bucket_stack import LogBucketStack
 
 _nvm_hack.hack_nvm_path()

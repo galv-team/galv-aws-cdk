@@ -33,7 +33,6 @@ def suppress_nags_pre_synth(stack: Stack):
         _suppress_rds_nags(stack, name)
         _suppress_alb_attributes(stack, name)
         _suppress_lambda_resource(stack)
-        _suppress_frontend(stack, name)
     except Exception as e:
         raise InapplicableSuppressionError("Failed to apply pre-synth suppressions") from e
 

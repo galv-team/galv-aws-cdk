@@ -14,7 +14,7 @@ from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, Applicat
 from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from cdk_nag import NagSuppressions
 from constructs import Construct
-from nag_supressions import suppress_nags_pre_synth
+from nag_suppressions import suppress_nags_pre_synth
 from utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
 
 
@@ -43,6 +43,9 @@ class GalvFrontend(Stack):
         if self.is_route53_domain is None:
             self.is_route53_domain = True
         self.frontend_version = self.node.try_get_context("frontendVersion") or "latest"
+        if self.frontend_version == "latest" and self.is_production:
+            print("Using 'latest' frontend version. This is not recommended for production deployments.")
+
         self.log_bucket = log_bucket
 
         self._update_log_bucket_access()
@@ -238,7 +241,8 @@ class GalvFrontend(Stack):
             environment={
                 "ENV": "production" if self.is_production else "development",
                 "LOG_LEVEL": "info",
-                "VITE_GALV_API_BASE_URL": f"https://{self.backend_fqdn}/api",
+                "VITE_GALV_API_BASE_URL": f"https://{self.backend_fqdn}",
+                "VITE_GALV_ANALYTICS_URL": "https://plausible-oxrse.fly.dev"
             },
         )
 

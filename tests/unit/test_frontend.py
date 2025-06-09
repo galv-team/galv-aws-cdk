@@ -5,7 +5,7 @@ from constructs import IConstruct
 
 import _nvm_hack
 from frontend_stack import GalvFrontend
-from nag_supressions import suppress_nags_post_synth
+from nag_suppressions import suppress_nags_post_synth
 from log_bucket_stack import LogBucketStack
 
 _nvm_hack.hack_nvm_path()

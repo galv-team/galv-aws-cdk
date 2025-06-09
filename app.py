@@ -10,13 +10,13 @@ _nvm_hack.hack_nvm_path()
 
 from frontend_stack import GalvFrontend
 
-from aws_cdk import App, Aspects, RemovalPolicy, aws_s3 as s3
-from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks, NagSuppressions
+from aws_cdk import App, Aspects
+from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 import argparse
 import json
 from pathlib import Path
 from galv_cdk.backend_stack import GalvBackend
-from galv_cdk.nag_supressions import suppress_nags_post_synth
+from galv_cdk.nag_suppressions import suppress_nags_post_synth
 from utils import print_nag_findings
 
 # Parse command-line arguments

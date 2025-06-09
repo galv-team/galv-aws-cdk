@@ -28,7 +28,7 @@ from cdk_nag import NagSuppressions
 from constructs import Construct
 from datetime import datetime, timezone
 
-from nag_supressions import suppress_nags_pre_synth
+from nag_suppressions import suppress_nags_pre_synth
 from utils import get_aws_custom_cert_instructions, inject_protected_env, create_waf_scope_web_acl
 
 
@@ -80,6 +80,8 @@ class GalvBackend(Stack):
         )
 
         self.backend_version = self.node.try_get_context("backendVersion") or "latest"
+        if self.backend_version == "latest" and self.is_production:
+            print("Using 'latest' backend version. This is not recommended for production deployments.")
 
         self._create_domain_certificates()
         self._update_log_bucket_access()
@@ -762,7 +764,7 @@ class GalvBackend(Stack):
                 tag=self.backend_version
             ),
             entry_point=["/bin/sh", "-c"],
-            command=["python", "manage.py", "validation_monitor"],
+            command=["python3 manage.py validate_against_schemas"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix=f"{self.name}-ValidationMonitor",
                 log_group=log_group,
