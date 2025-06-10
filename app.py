@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 # Horrible Hack to support NVM
 import os
-
-from log_bucket_stack import LogBucketStack
 from tests.unit import _nvm_hack
 
 _nvm_hack.hack_nvm_path()
 # /HH
-
-from frontend_stack import GalvFrontend
 
 from aws_cdk import App, Aspects
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 import argparse
 import json
 from pathlib import Path
+
+from galv_cdk.log_bucket_stack import LogBucketStack
+from galv_cdk.frontend_stack import GalvFrontend
 from galv_cdk.backend_stack import GalvBackend
 from galv_cdk.nag_suppressions import suppress_nags_post_synth
-from utils import print_nag_findings
+from galv_cdk.utils import print_nag_findings
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser()

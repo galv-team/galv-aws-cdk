@@ -1,4 +1,3 @@
-import json
 import string
 from secrets import choice
 
@@ -18,7 +17,7 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_route53_targets as route53_targets,
     aws_certificatemanager as acm,
-    Stack, CfnOutput, Duration, Token, Tags, aws_cloudfront, aws_cloudfront_origins
+    Stack, CfnOutput, Duration, Token, Tags, aws_cloudfront
 )
 from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, ApplicationProtocol, HealthCheck, ListenerAction
 from aws_cdk.aws_s3 import IBucket
@@ -28,8 +27,8 @@ from cdk_nag import NagSuppressions
 from constructs import Construct
 from datetime import datetime, timezone
 
-from nag_suppressions import suppress_nags_pre_synth
-from utils import get_aws_custom_cert_instructions, inject_protected_env, create_waf_scope_web_acl
+from .nag_suppressions import suppress_nags_pre_synth
+from .utils import get_aws_custom_cert_instructions, inject_protected_env, create_waf_scope_web_acl
 
 
 class GalvBackend(Stack):
