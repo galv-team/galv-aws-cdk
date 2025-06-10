@@ -50,7 +50,8 @@ Configure your environment by editing `cdk.json`. The following table describes 
 | `backendVersion`          | Tag for backend Docker image (e.g. from GHCR)                                                         |
 | `frontendVersion`         | Tag for frontend Docker image (e.g. from GHCR)                                                        |
 | `projectNameTag`          | Used for tagging and grouping resources                                                               |
-| `isProduction`            | Controls retention policies and protections (e.g., deletion protection)                               |
+| `isProduction`            | Controls retention policies and protections, debugging, ECS exec                                      |
+| `removalProtection`       | Overrides retention policies and protections (e.g., deletion protection)                              |
 | `mailFromUser`            | Local part of the default email sender address                                                        |
 | `mailFromDomain`          | Domain for the default email sender address                                                           |
 | `frontendEnvironment`     | Key-value pairs of environment variables to pass to the frontend container                            |

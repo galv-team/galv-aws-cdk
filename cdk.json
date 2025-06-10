@@ -8,6 +8,7 @@
     "backendVersion": "latest",
     "frontendVersion": "latest",
     "isProduction": false,
+    "removalProtection": null,
     "frontendEnvironment": {},
     "backendEnvironment": {
       "DJANGO_SUPERUSER_USERNAME": "admin",

@@ -32,9 +32,15 @@ class GalvFrontend(Stack):
 
         self.name = self.node.try_get_context("name") or "galv"
         self.project_tag = self.node.try_get_context("projectNameTag") or "galv"
+
         self.is_production = self.node.try_get_context("isProduction")
         if self.is_production is None:
             self.is_production = True
+
+        self.removal_protection = self.node.try_get_context("removalProtection")
+        if self.removal_protection is None:
+            self.removal_protection = self.is_production
+
         self.domain_name = self.node.get_context("domainName")
         self.subdomain = self.node.get_context("frontendSubdomain")
         self.fqdn = f"{self.subdomain}.{self.domain_name}".lstrip(".")
@@ -237,8 +243,8 @@ class GalvFrontend(Stack):
                 log_group=logs.LogGroup(
                     self,
                     f"{self.name}-FrontendLogGroup",
-                    retention=logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY,
-                    removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
+                    retention=logs.RetentionDays.ONE_YEAR if self.removal_protection else logs.RetentionDays.ONE_DAY,
+                    removal_policy=RemovalPolicy.RETAIN if self.removal_protection else RemovalPolicy.DESTROY,
                 ),
             ),
             port_mappings=[ecs.PortMapping(container_port=80)],

@@ -37,9 +37,14 @@ class GalvBackend(Stack):
 
         self.project_tag = self.node.try_get_context("projectNameTag") or "galv"
         self.name = self.node.try_get_context("name") or "galv"
+
         self.is_production = self.node.try_get_context("isProduction")
         if self.is_production is None:
             self.is_production = True
+
+        self.removal_protection = self.node.try_get_context("removalProtection")
+        if self.removal_protection is None:
+            self.removal_protection = self.is_production
 
         self.domain_name = self.node.try_get_context("domainName")
         backend_subdomain = self.node.try_get_context("backendSubdomain") or "api"
@@ -60,7 +65,7 @@ class GalvBackend(Stack):
         self.stack = Stack.of(self)
         self.log_bucket = log_bucket
 
-        self.log_retention = logs.RetentionDays.ONE_YEAR if self.is_production else logs.RetentionDays.ONE_DAY
+        self.log_retention = logs.RetentionDays.ONE_YEAR if self.removal_protection else logs.RetentionDays.ONE_DAY
 
         self.kms_key = kms.Key(self, f"{self.name}-KmsKey", enable_key_rotation=True)
 
@@ -292,8 +297,8 @@ class GalvBackend(Stack):
         self.media_bucket = s3.Bucket(
             self,
             f"{self.name}-BackendStorage",
-            removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
-            auto_delete_objects=not self.is_production,
+            removal_policy=RemovalPolicy.RETAIN if self.removal_protection else RemovalPolicy.DESTROY,
+            auto_delete_objects=not self.removal_protection,
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.kms_key,
             object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,  # Enables ACLs
@@ -425,13 +430,13 @@ class GalvBackend(Stack):
             ),
             publicly_accessible=False,
             allocated_storage=20,
-            removal_policy=RemovalPolicy.RETAIN if self.is_production else RemovalPolicy.DESTROY,
-            deletion_protection=self.is_production,
+            removal_policy=RemovalPolicy.RETAIN if self.removal_protection else RemovalPolicy.DESTROY,
+            deletion_protection=self.removal_protection,
             database_name=db_name,
             credentials=rds.Credentials.from_secret(self.db_secret),
         )
 
-        if not self.is_production:
+        if not self.removal_protection:
             NagSuppressions.add_resource_suppressions(
                 self.db_instance.node.default_child,
                 [
@@ -885,5 +890,5 @@ class GalvBackend(Stack):
             "LoadBalancerAttributes.1.Key", "deletion_protection.enabled"
         )
         alb.add_property_override(
-            "LoadBalancerAttributes.1.Value", str(self.is_production).lower()
+            "LoadBalancerAttributes.1.Value", str(self.removal_protection).lower()
         )
