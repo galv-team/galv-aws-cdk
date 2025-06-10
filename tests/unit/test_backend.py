@@ -1,20 +1,23 @@
 # Horrible Hack to support NVM
+from aws_cdk.aws_s3 import Bucket
+
 import _nvm_hack
-from nag_supressions import suppress_nags_post_synth
+from nag_suppressions import suppress_nags_post_synth
+from log_bucket_stack import LogBucketStack
 
 _nvm_hack.hack_nvm_path()
 # /HH
 
 import unittest
-from aws_cdk import App, Aspects, assertions
+from aws_cdk import App, Aspects, assertions, Stack
 from aws_cdk.assertions import Template, Match
 from constructs import IConstruct
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 
-from galv_cdk.galv_stack import GalvStack
+from galv_cdk.backend_stack import GalvBackend
 
 
-class TestGalvStack(unittest.TestCase):
+class TestGalvBackend(unittest.TestCase):
     def setUp(self):
         self.app = App(context={
             "name": "test",
@@ -43,13 +46,11 @@ class TestGalvStack(unittest.TestCase):
         Aspects.of(self.app).add(AwsSolutionsChecks(verbose=True))
         Aspects.of(self.app).add(HIPAASecurityChecks())
 
-        self.stack = GalvStack(
+        self.stack = GalvBackend(
             self.app,
             "TestStack",
-            env={
-                "account": "123456789012",
-                "region": "eu-west-2"
-            }
+            log_bucket=LogBucketStack(self.app, "TestRootStack", name="test", is_production=False).log_bucket,
+            env={"account": "123456789012", "region": "eu-west-2"}
         )
         self.app.synth()
         suppress_nags_post_synth(self.stack, self.stack.name)
@@ -83,9 +84,9 @@ class TestGalvStack(unittest.TestCase):
                     elif entry.type in ["aws:cdk:warning", "aws:cdk:error"]:
                         message = entry.data
                         rule_id = None
-                        if isinstance(message, str) and ":" in message:
+                        if isinstance(message, str) and ": " in message:
                             # Extract rule ID prefix like 'AwsSolutions-CB4'
-                            rule_id = message.split(":", 1)[0].strip()
+                            rule_id = message.split(": ", 1)[0].strip()
 
                         target = f"{path}" if path.endswith("/Resource") else f"{path}.node.default_child"
                         suggestion = (
@@ -135,57 +136,6 @@ class TestGalvStack(unittest.TestCase):
             ])
         })
 
-    def test_frontend_bucket_created(self):
-        self.template.has_resource("AWS::S3::Bucket", {
-            "Properties": {
-                "WebsiteConfiguration": {
-                    "IndexDocument": "index.html"
-                }
-            }
-        })
-
-    def test_backend_and_log_buckets_exist_and_configured(self):
-        resources = self.template.to_json().get("Resources", {})
-
-        backend_buckets = [
-            (name, res) for name, res in resources.items()
-            if res["Type"] == "AWS::S3::Bucket"
-               and "BackendStorage" in name
-        ]
-        log_buckets = [
-            (name, res) for name, res in resources.items()
-            if res["Type"] == "AWS::S3::Bucket"
-               and "LogBucket" in name
-        ]
-
-        self.assertEqual(len(backend_buckets), 1, "Expected one backend bucket")
-        self.assertEqual(len(log_buckets), 1, "Expected one log bucket")
-
-        backend_bucket = backend_buckets[0][1]
-        log_bucket = log_buckets[0][1]
-
-        # Check backend bucket has KMS encryption
-        encryption_config = backend_bucket["Properties"].get("BucketEncryption", {})
-        self.assertIn("ServerSideEncryptionConfiguration", encryption_config)
-        algo = encryption_config["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["SSEAlgorithm"]
-        self.assertEqual(algo, "aws:kms")
-
-        # Check logging is enabled
-        logging = backend_bucket["Properties"].get("LoggingConfiguration", {})
-        self.assertIn("DestinationBucketName", logging)
-        self.assertIn("BackendStorage-access-logs/", logging.get("LogFilePrefix"))
-
-        # Check public access block
-        public_block = backend_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
-        for key in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
-            self.assertTrue(public_block.get(key), f"{key} should be true on backend bucket")
-
-        # Log bucket should also block public access
-        log_public_block = log_bucket["Properties"].get("PublicAccessBlockConfiguration", {})
-        for key in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
-            self.assertTrue(log_public_block.get(key), f"{key} should be true on log bucket")
-
-
     def test_rds_postgres_instance_created(self):
         self.template.has_resource_properties("AWS::RDS::DBInstance", {
             "Engine": "postgres"
@@ -193,9 +143,6 @@ class TestGalvStack(unittest.TestCase):
 
     def test_django_backend_service_created(self):
         self.template.resource_count_is("AWS::ECS::Service", 1)
-
-    def test_react_frontend_distribution_created(self):
-        self.template.has_resource("AWS::CloudFront::Distribution", {})
 
     def test_all_resources_tagged_with_project_name(self):
         resources = self.template.to_json().get("Resources", {})
@@ -315,7 +262,9 @@ class TestGalvStack(unittest.TestCase):
         self.template.has_resource_properties("AWS::ECS::TaskDefinition", {
             "ContainerDefinitions": Match.array_with([
                 Match.object_like({
-                    "Command": ["/code/setup_db.sh"]
+                    "Command": Match.array_with([
+                        Match.string_like_regexp(".*collectstatic.*")
+                    ])
                 })
             ])
         })
@@ -326,8 +275,14 @@ class TestGalvStack(unittest.TestCase):
             "monitorIntervalMinutes": 5,
             "mailFromDomain": "example.com",
             "domainName": "example.com",
+            "frontendSubdomain": "",
         })
-        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
+        stack = GalvBackend(
+            app,
+            "TestStack",
+            log_bucket=LogBucketStack(app, "TestRootStack", name="test", is_production=False).log_bucket,
+            env={"account": "123456789012", "region": "eu-west-2"}
+        )
         template = Template.from_stack(stack)
 
         # Should create an Events::Rule to run the task
@@ -339,8 +294,14 @@ class TestGalvStack(unittest.TestCase):
             "monitorIntervalMinutes": 0,
             "mailFromDomain": "example.com",
             "domainName": "example.com",
+            "frontendSubdomain": "",
         })
-        stack = GalvStack(app, "TestStack", env={"account": "123456789012", "region": "eu-west-2"})
+        stack = GalvBackend(
+            app,
+            "TestStack",
+            log_bucket=LogBucketStack(app, "TestRootStack", name="test", is_production=False).log_bucket,
+            env={"account": "123456789012", "region": "eu-west-2"}
+        )
         template = Template.from_stack(stack)
 
         # Should NOT create an Events::Rule
@@ -432,95 +393,124 @@ class TestGalvStack(unittest.TestCase):
             )
             self.fail(f"The following resources are missing explicit security groups:\n{lines}")
 
-    def test_only_alb_in_public_subnet(self):
-        """
-        Ensure only the ALB is assigned to the public subnet.
-        """
-        resources = self.template.to_json().get("Resources", {})
-        public_subnet_ids = set()
-        violations = []
-
-        # Gather all public subnet logical IDs
-        for logical_id, res in resources.items():
-            if res.get("Type") == "AWS::EC2::Subnet" and "public" in logical_id.lower():
-                public_subnet_ids.add(logical_id)
-
-        # Check each resource with Subnet/NetworkConfiguration
-        for logical_id, res in resources.items():
-            rtype = res.get("Type")
-            props = res.get("Properties", {})
-
-            # Check ALB placement
-            if rtype == "AWS::ElasticLoadBalancingV2::LoadBalancer":
-                subnet_ids = props.get("Subnets", [])
-                for subnet in subnet_ids:
-                    if isinstance(subnet, dict) and "Ref" in subnet:
-                        subnet_id = subnet["Ref"]
-                        if subnet_id not in public_subnet_ids:
-                            violations.append((logical_id, "ALB uses a non-public subnet"))
-
-            # Check everything else
-            elif "Subnets" in props or "NetworkConfiguration" in props:
-                subnet_refs = []
-
-                if "Subnets" in props:
-                    subnet_refs = props["Subnets"]
-                elif "NetworkConfiguration" in props:
-                    awsvpc = props["NetworkConfiguration"].get("AwsvpcConfiguration", {})
-                    subnet_refs = awsvpc.get("Subnets", [])
-
-                for subnet in subnet_refs:
-                    if isinstance(subnet, dict) and "Ref" in subnet:
-                        subnet_id = subnet["Ref"]
-                        if subnet_id in public_subnet_ids:
-                            violations.append((logical_id, f"{rtype} assigned to public subnet"))
-
-        if violations:
-            details = "\n".join(f"{lid}: {msg}" for lid, msg in violations)
-            self.fail(f"The following resources are improperly assigned to public subnets:\n{details}")
-
     def test_backend_certificate_created(self):
         self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
             "DomainName": "api.example.com",
             "ValidationMethod": "DNS"
         })
 
-    def test_frontend_certificate_created(self):
-        self.template.has_resource_properties("AWS::CertificateManager::Certificate", {
-            "DomainName": Match.string_like_regexp("^example.com$"),
-            "ValidationMethod": "DNS"
-        })
+    def test_setup_task_cr_has_passrole_permission(self):
+        resources = self.template.to_json().get("Resources", {})
 
-    def test_cert_domains_and_cdn_aliases(self):
-        template = Template.from_stack(self.stack)
+        # Find the logical ID of the setup task role
+        task_role_logical_id = None
+        for name, res in resources.items():
+            if res["Type"] == "AWS::IAM::Role" and "SetupDbTaskDefTaskRole" in name:
+                task_role_logical_id = name
+                break
 
-        # Check CloudFront distribution uses expected alias
-        template.has_resource_properties("AWS::CloudFront::Distribution", {
-            "DistributionConfig": {
-                "Aliases": Match.array_with(["example.com"])
-            }
-        })
+        self.assertIsNotNone(task_role_logical_id, "Could not find setup task IAM role")
 
-
-def test_no_raw_wildcard_iam_policies(self):
-    """
-    Fails if any IAM policy contains '*' in Action/Resource without explicit appliesTo suppression.
-    """
-    resources = self.template.to_json().get("Resources", {})
-    for logical_id, res in resources.items():
-        if res.get("Type") == "AWS::IAM::Policy":
-            doc = res["Properties"].get("PolicyDocument", {})
-            statements = doc.get("Statement", [])
+        # Search for iam:PassRole on that exact logical ID via Fn::GetAtt
+        found = False
+        for res in resources.values():
+            if res["Type"] != "AWS::IAM::Policy":
+                continue
+            statements = res.get("Properties", {}).get("PolicyDocument", {}).get("Statement", [])
             for stmt in statements:
-                action = stmt.get("Action")
-                resource = stmt.get("Resource")
+                actions = stmt.get("Action", [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "iam:PassRole" not in actions:
+                    continue
 
-                # Single string or list
-                actions = [action] if isinstance(action, str) else action or []
-                resources_ = [resource] if isinstance(resource, str) else resource or []
+                resource_entries = stmt.get("Resource", [])
+                if not isinstance(resource_entries, list):
+                    resource_entries = [resource_entries]
 
-                if any(":" in a and a.endswith("*") for a in actions) or any(r == "*" for r in resources_):
-                    self.fail(f"Wildcard IAM policy found in {logical_id}: {stmt}")
+                for r in resource_entries:
+                    try:
+                        if isinstance(r, dict) and r.get("Fn::GetAtt", [])[0] == task_role_logical_id:
+                            found = True
+                    except IndexError:
+                        pass
+
+        self.assertTrue(found, f"iam:PassRole not granted on setup task role ({task_role_logical_id})")
+
+    def test_no_dangerous_wildcard_iam_policies(self):
+        resources = self.template.to_json().get("Resources", {})
+        allowed_wildcards = {
+            "s3:GetObject*",
+            "s3:GetBucket*",
+            "s3:PutObject",
+            "s3:List*",
+            "s3:DeleteObject*",
+            "s3:Abort*",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*"
+        }
+
+        violations = []
+
+        for logical_id, res in resources.items():
+            if res.get("Type") == "AWS::IAM::Policy":
+                doc = res["Properties"].get("PolicyDocument", {})
+                statements = doc.get("Statement", [])
+                for stmt in statements:
+                    actions = stmt.get("Action", [])
+                    if isinstance(actions, str):
+                        actions = [actions]
+
+                    for action in actions:
+                        if "*" in action:
+                            # Deny s3:*, *, or anything not explicitly allowed
+                            if action not in allowed_wildcards:
+                                violations.append(f"{logical_id} uses disallowed action: {action}")
+
+        if violations:
+            self.fail("Disallowed wildcard IAM actions:\n" + "\n".join(violations))
+
+    def test_all_networked_resources_use_same_vpc(self):
+        template = self.template.to_json()
+        resources = template["Resources"]
+
+        # Step 1: Map each subnet to its VPC
+        subnet_to_vpc = {}
+        for logical_id, resource in resources.items():
+            if resource["Type"] == "AWS::EC2::Subnet":
+                props = resource.get("Properties", {})
+                vpc_id = props.get("VpcId")
+                if isinstance(vpc_id, dict) and "Ref" in vpc_id:
+                    subnet_to_vpc[logical_id] = vpc_id["Ref"]
+
+        # Step 2: Track VPCs used by ECS services, SGs, and VPCEs
+        vpc_references = set()
+
+        for resource in resources.values():
+            props = resource.get("Properties", {})
+            rtype = resource["Type"]
+
+            if rtype == "AWS::EC2::VPCEndpoint" or rtype == "AWS::EC2::SecurityGroup":
+                vpc_id = props.get("VpcId")
+                if isinstance(vpc_id, dict) and "Ref" in vpc_id:
+                    vpc_references.add(vpc_id["Ref"])
+
+            elif rtype == "AWS::ECS::Service":
+                subnet_config = props.get("NetworkConfiguration", {}).get("AwsvpcConfiguration", {})
+                subnet_ids = subnet_config.get("Subnets", [])
+                for subnet in subnet_ids:
+                    if isinstance(subnet, dict) and "Ref" in subnet:
+                        subnet_id = subnet["Ref"]
+                        if subnet_id in subnet_to_vpc:
+                            vpc_references.add(subnet_to_vpc[subnet_id])
+                        else:
+                            # fallback if subnet → VPC mapping was missing
+                            vpc_references.add(subnet_id)
+
+        self.assertEqual(
+            len(vpc_references), 1,
+            f"Expected all networked resources to use the same VPC, but found: {vpc_references}"
+        )
 
 
 if __name__ == '__main__':

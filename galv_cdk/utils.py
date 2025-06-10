@@ -1,7 +1,7 @@
 import secrets
 import string
 
-from aws_cdk import Stack
+from aws_cdk import Stack, Environment
 from aws_cdk.aws_s3 import IBucket
 from cdk_nag import NagSuppressions
 from constructs import IConstruct
@@ -55,6 +55,22 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
     :param log_bucket: S3 bucket for logging
     :return: CfnWebACL resource
     """
+
+    # log_bucket.add_to_resource_policy(iam.PolicyStatement(
+    #     sid="AWSWAFLoggingPermissions",
+    #     actions=["s3:PutObject"],
+    #     resources=[log_bucket.arn_for_objects("AWSLogs/*")],
+    #     principals=[iam.ServicePrincipal("logging.s3.amazonaws.com")],
+    #     conditions={
+    #         "StringEquals": {
+    #             "aws:SourceAccount": Stack.of(scope).account
+    #         },
+    #         "ArnLike": {
+    #             "aws:SourceArn": f"arn:aws:wafv2:{Stack.of(scope).region}:{Stack.of(scope).account}:*/webacl/*"
+    #         }
+    #     }
+    # ))
+
     waf = wafv2.CfnWebACL(
         scope,
         id,
@@ -68,7 +84,7 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
         name=f"{name}-waf",
         rules=[
             wafv2.CfnWebACL.RuleProperty(
-                name="AWSManagedRulesCommonRuleSet",
+                name=f"{name}-AWSManagedRulesCommonRuleSet",
                 priority=0,
                 override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                 statement=wafv2.CfnWebACL.StatementProperty(
@@ -86,30 +102,45 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
         ]
     )
 
-    log_bucket.add_to_resource_policy(iam.PolicyStatement(
-        sid="AWSWAFLoggingPermissions",
-        actions=["s3:PutObject"],
-        resources=[log_bucket.arn_for_objects("AWSLogs/*")],
-        principals=[iam.ServicePrincipal("logging.s3.amazonaws.com")],
-        conditions={
-            "StringEquals": {
-                "aws:SourceAccount": Stack.of(scope).account
-            },
-            "ArnLike": {
-                "aws:SourceArn": f"arn:aws:wafv2:{Stack.of(scope).region}:{Stack.of(scope).account}:*/webacl/*"
-            }
-        }
-    ))
-
-    wafv2.CfnLoggingConfiguration(
-        scope,
-        f"{name}-WebAclLogging",
-        log_destination_configs=[log_bucket.bucket_arn],
-        resource_arn=waf.attr_arn,
-        logging_filter=wafv2.CfnLoggingConfiguration.LoggingFilterProperty(
-            default_behavior="KEEP",
-            filters=[],
-        )
+    NagSuppressions.add_resource_suppressions(
+        waf,
+        [{
+            "id": "HIPAA.Security-WAFv2LoggingEnabled",
+            "reason": "Logging is not required for this WAF; access is controlled via ALB security group or CloudFront"
+        }],
+        apply_to_children=True
     )
 
+    # wafv2.CfnLoggingConfiguration(
+    #     scope,
+    #     f"{name}-WebAclLogging",
+    #     log_destination_configs=[log_bucket.bucket_arn],
+    #     resource_arn=waf.attr_arn,
+    # )
+
     return waf
+
+def get_aws_custom_cert_instructions(fqdn: str):
+    """
+    Generate instructions for creating an AWS Certificate Manager (ACM) certificate for a given domain name (FQDN).
+    The instructions include the command to create the certificate and the command to validate it using DNS.
+    """
+    return f"""No certificate ARN was provided, and this domain ({fqdn}) is not managed by Route53, so CDK cannot create and validate
+a certificate automatically.
+To proceed, you must manually create a certificate in AWS Certificate Manager (ACM).
+Instructions:
+1. In the AWS Console, switch to the region: us-east-1 (required for CloudFront certificates).
+2. Navigate to AWS Certificate Manager (ACM).
+3. Request a new public certificate for the domain:
+       {fqdn}
+4. Choose "DNS Validation".
+5. Complete the DNS setup as instructed (you will add a CNAME to your DNS provider).
+6. Once the certificate status shows "Issued", copy the certificate ARN.
+Then re-run the CDK deployment with the certificate ARN provided via context:
+    --context certificateArn=arn:aws:acm:us-east-1:<account-id>:certificate/<uuid>
+You can also store it in `cdk.json` like:
+    "context": {{
+        "certificateArn": "arn:aws:acm:us-east-1:<account-id>:certificate/<uuid>"
+    }}
+This step is required because CloudFormation cannot manage DNS validation for domains not hosted in Route53.
+    """

@@ -1,17 +1,19 @@
 {
-  "app": "python3 app.py",
+  "app": "python app.py",
   "context": {
-    "name": "galv",
-    "mailFromDomain": "mail.example.com",
+    "name": "galv-test",
+    "mailFromDomain": "oxrse.uk",
     "mailFromUser": "galv-no-reply",
-    "projectNameTag": "galv",
+    "projectNameTag": "galv-test",
     "backendVersion": "latest",
     "frontendVersion": "latest",
-    "isProduction": true,
+    "isProduction": false,
     "frontendEnvironment": {},
     "backendEnvironment": {
       "DJANGO_SUPERUSER_USERNAME": "admin",
-      "DJANGO_LOG_LEVEL": "INFO",
+      "DJANGO_LOG_LEVEL": "DEBUG",
+      "DJANGO_LOG_LEVEL_CORE": "DEBUG",
+      "DJANGO_DEBUG":  "True",
       "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "",
       "DJANGO_USER_ACTIVATION_TOKEN_EXPIRY_S": ""
     },
@@ -19,10 +21,11 @@
     "frontendSecretsKeys": [],
     "backendSecretsName": "galv-backend-secrets",
     "backendSecretsKeys": [],
+    "smtpSecretName": "",
     "monitorIntervalMinutes": 5,
-    "frontendSubdomain": "",
-    "backendSubdomain": "api",
-    "domainName": "example.com",
+    "frontendSubdomain": "galv-test-app",
+    "backendSubdomain": "galv-test-api",
+    "domainName": "oxrse.uk",
     "isRoute53Domain": true,
     "enableContainerInsights": null
   }

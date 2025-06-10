@@ -1,0 +1,15 @@
+{
+  "availability-zones:account=211125623194:region=eu-west-2": [
+    "eu-west-2a",
+    "eu-west-2b",
+    "eu-west-2c"
+  ],
+  "hosted-zone:account=211125623194:domainName=oxrse.uk:region=eu-west-2": {
+    "Id": "/hostedzone/Z008464727N1AMYAL2MPZ",
+    "Name": "oxrse.uk."
+  },
+  "hosted-zone:account=211125623194:domainName=oxrse.uk:region=us-east-1": {
+    "Id": "/hostedzone/Z008464727N1AMYAL2MPZ",
+    "Name": "oxrse.uk."
+  }
+}
