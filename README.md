@@ -65,6 +65,8 @@ Configure your environment by editing `cdk.json`. The following table describes 
 | `domainName`              | Domain name for the application (e.g., `example.com`)                                                 |
 | `isRoute53Domain`         | Whether the domain is managed by Route 53 (true/false)                                                |
 | `enableContainerInsights` | Whether to enable CloudWatch Container Insights for ECS tasks (true/false). Defaults to isProduction. |
+| `certificateArn`          | ARN of an existing ACM certificate when the domain is not in Route 53                                 |
+| `smtpSecretName`          | Name of the AWS Secrets Manager entry for SMTP credentials. Defaults to `projectNameTag`-smtp         |
 
 Example `cdk.json`:
 
@@ -93,6 +95,19 @@ Example `cdk.json`:
   }
 }
 ```
+
+### 🔐 Certificates, WAF & Logs
+
+The stacks need TLS certificates for the frontend and backend domains. When
+`isRoute53Domain` is `true` the certificates are created automatically and
+validated using Route 53 DNS records. If the domain is external you must supply
+an existing certificate ARN via the `certificateArn` context key. See
+`get_aws_custom_cert_instructions` for the manual ACM steps and example
+`--context certificateArn=arn:aws:acm:us-east-1:<account-id>:certificate/<uuid>`.
+
+A WAFv2 WebACL is attached to each load balancer and a dedicated S3 log bucket
+is created for ALB, flow log and WAF logs.
+
 
 ---
 
@@ -160,3 +175,34 @@ All ECS tasks log to CloudWatch. Log groups are named by task (e.g., `check-stat
 | Simple Email Service           | SES              | Sends application emails via SMTP with IAM-auth                             |
 | GitHub Container Registry      | GHCR             | Stores and serves the Docker image used by the backend                      |
 
+---
+
+## Development
+
+Development happens on the `develop` branch. 
+Please target pull requests to `develop` for review.
+
+Once changes are approved, they will be merged into `main`. 
+Releases are tagged from `main`.
+
+Please ensure your changes are well-tested and documented before submitting a PR.
+
+--- 
+
+## Deploying with GitHub Actions
+
+Galv repositories can use GitHub Actions to automate deployments.
+These actions will invoke this CDK to deploy the infrastructure.
+Ensure your repository has the necessary secrets configured for deployment.
+
+The IAM role is written to be simple and robust rather than minimizing permissions.
+This means that it has broader permissions than necessary, so its use should be limited and carefully monitored.
+
+To set up the relevant IAM roles and identities, you'll need to:
+1. Create an IAM role with: 
+   - Trusted entity: `Web Identity`
+   - Web identity provider: `token.actions.githubusercontent.com`
+   - Audience: `sts.amazonaws.com`
+   - GitHub organization: `galv-team`
+   - Permissions from `permissions.json`
+2. Create an IAM user 
