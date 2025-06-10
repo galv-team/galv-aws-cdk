@@ -14,8 +14,8 @@ from aws_cdk.aws_elasticloadbalancingv2 import ApplicationLoadBalancer, Applicat
 from aws_cdk.aws_wafv2 import CfnWebACLAssociation
 from cdk_nag import NagSuppressions
 from constructs import Construct
-from .nag_suppressions import suppress_nags_pre_synth
-from .utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
+from galv_cdk.nag_suppressions import suppress_nags_pre_synth
+from galv_cdk.utils import get_aws_custom_cert_instructions, create_waf_scope_web_acl
 
 
 class GalvFrontend(Stack):

@@ -27,8 +27,8 @@ from cdk_nag import NagSuppressions
 from constructs import Construct
 from datetime import datetime, timezone
 
-from .nag_suppressions import suppress_nags_pre_synth
-from .utils import get_aws_custom_cert_instructions, inject_protected_env, create_waf_scope_web_acl
+from galv_cdk.nag_suppressions import suppress_nags_pre_synth
+from galv_cdk.utils import get_aws_custom_cert_instructions, inject_protected_env, create_waf_scope_web_acl
 
 
 class GalvBackend(Stack):
