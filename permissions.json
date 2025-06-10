@@ -1,0 +1,78 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CDKBootstrapPermissions",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:*",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DeployCoreServices",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:*",
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ec2:*",
+        "rds:*",
+        "secretsmanager:*",
+        "logs:*",
+        "events:*",
+        "wafv2:*",
+        "route53:*",
+        "acm:*",
+        "elasticloadbalancing:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ScopedPassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "ecs-tasks.amazonaws.com",
+            "lambda.amazonaws.com",
+            "cloudformation.amazonaws.com",
+            "ec2.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "KMSForEncryption",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:DescribeKey",
+        "kms:EnableKeyRotation",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowTaggingForOwnership",
+      "Effect": "Allow",
+      "Action": [
+        "tag:GetResources",
+        "tag:TagResources",
+        "tag:GetTagValues"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
