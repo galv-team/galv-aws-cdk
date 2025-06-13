@@ -17,7 +17,7 @@ def suppress_nags_pre_synth(stack: Stack):
             _suppress_cert_stack(stack)
 
         _suppress_frontend(stack, name)
-        _suppress_backend_taskrole_policy(stack, name)
+        _suppress_taskrole_policy(stack, name)
         _suppress_vpc_endpoints(stack, name)
         _suppress_backend_bucket(stack, name)
         _suppress_backend_iams(stack, name)
@@ -61,16 +61,18 @@ def _suppress_cert_stack(stack: Stack):
             raise InapplicableSuppressionError("Certificate not found") from e
 
 
-def _suppress_backend_taskrole_policy(stack: Stack, name: str):
+def _suppress_taskrole_policy(stack: Stack, name: str):
     if stack.__class__.__name__ == "GalvBackend":
         service = stack.node.find_child(f"{name}-BackendService")
         task_role = service.task_definition.task_role
         policies = [task_role.node.find_child("DefaultPolicy")]
     else:
         service = stack.node.find_child(f"{name}-FrontendService")
+        task_role = service.task_definition.task_role
         execution_role = service.task_definition.execution_role
         policies = [
-            execution_role.node.find_child("DefaultPolicy")
+            execution_role.node.find_child("DefaultPolicy"),
+            task_role.node.find_child("DefaultPolicy"),
         ]
 
     if len(policies) < 1:
@@ -92,7 +94,8 @@ def _suppress_backend_taskrole_policy(stack: Stack, name: str):
                     "id": "HIPAA.Security-IAMNoInlinePolicy",
                     "reason": "Inline policy is okay here; creating it all through roles is unnecessary overhead."
                 }
-            ]
+            ],
+            apply_to_children=True
         )
 
 
