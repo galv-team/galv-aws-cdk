@@ -23,9 +23,21 @@ cdk bootstrap
 
 4. **Deploy the infrastructure:**
 
+Make sure you're logged into AWS CLI. 
+If your login has exprired you'll get a Python error about the region not being configured in `env`.
+
 ```bash
-cdk deploy
+cdk deploy --all --context backendVersion=<backend-version> --context frontendVersion=<frontend-version> --profile <aws-profile-name>
 ```
+
+If you just want to deploy the backend service, you can run:
+
+```bash 
+cdk deploy <project-name>-BackendStack --context backendVersion=<backend-version> --profile <aws-profile-name>
+```
+
+It is highly recommended that you specify `backendVersion` and `frontendVersion` in the command to ensure existing stacks get updated.
+If you just use 'latest', stacks will not be updated if the image tag has not changed.
 
 The deployment will:
 
