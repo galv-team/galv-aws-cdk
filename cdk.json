@@ -1,10 +1,10 @@
 {
   "app": "python app.py",
   "context": {
-    "name": "galv-test",
+    "name": "galv",
     "mailFromDomain": "oxrse.uk",
     "mailFromUser": "galv-no-reply",
-    "projectNameTag": "galv-test",
+    "projectNameTag": "galv",
     "backendVersion": "latest",
     "frontendVersion": "latest",
     "isProduction": false,
@@ -12,10 +12,10 @@
     "frontendEnvironment": {},
     "backendEnvironment": {
       "DJANGO_SUPERUSER_USERNAME": "admin",
-      "DJANGO_LOG_LEVEL": "DEBUG",
-      "DJANGO_LOG_LEVEL_CORE": "DEBUG",
-      "DJANGO_DEBUG":  "True",
-      "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "",
+      "DJANGO_LOG_LEVEL": null,
+      "DJANGO_LOG_LEVEL_CORE": null,
+      "DJANGO_DEBUG":  null,
+      "DJANGO_USER_ACTIVATION_OVERRIDE_ADDRESSES": "brady.planden@eng.ox.ac.uk,dibyendu.ghosh@eng.ox.ac.uk,matt.jaquiery@dtc.ox.ac.uk",
       "DJANGO_USER_ACTIVATION_TOKEN_EXPIRY_S": ""
     },
     "frontendSecretsName": "galv-frontend-secrets",
@@ -24,8 +24,8 @@
     "backendSecretsKeys": [],
     "smtpSecretName": "",
     "monitorIntervalMinutes": 5,
-    "frontendSubdomain": "galv-test-app",
-    "backendSubdomain": "galv-test-api",
+    "frontendSubdomain": "galv",
+    "backendSubdomain": "galv-api",
     "domainName": "oxrse.uk",
     "isRoute53Domain": true,
     "enableContainerInsights": null
