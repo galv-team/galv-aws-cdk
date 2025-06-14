@@ -329,8 +329,9 @@ class GalvBackend(Stack):
                 s3.HttpMethods.GET,
                 s3.HttpMethods.HEAD,
             ],
-            allowed_origins=[f"https://{self.fqdn}"],  # or restrict to your domains
+            allowed_origins=[f"https://{self.fqdn}", f"https://{self.frontend_fqdn}"],  # or restrict to your domains
             allowed_headers=["*"],
+            exposed_headers=["Content-Disposition", "Galv-Storage-Redirect-URL"],
             max_age=3000,
         )
         self.media_bucket.node.add_dependency(self.kms_key)
