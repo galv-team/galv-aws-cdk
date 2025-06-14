@@ -91,7 +91,13 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
                     managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                         name="AWSManagedRulesCommonRuleSet",
                         vendor_name="AWS"
-                    )
+                    ),
+                    rule_action_overrides=[
+                        wafv2.CfnWebACL.RuleActionOverrideProperty(
+                            name="SizeRestrictions_BODY",
+                            action=wafv2.CfnWebACL.RuleActionProperty(count={}),
+                        )
+                    ],
                 ),
                 visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
                     sampled_requests_enabled=True,

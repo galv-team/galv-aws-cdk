@@ -7,7 +7,7 @@
     "projectNameTag": "galv",
     "backendVersion": "latest",
     "frontendVersion": "latest",
-    "isProduction": false,
+    "isProduction": true,
     "removalProtection": null,
     "frontendEnvironment": {},
     "backendEnvironment": {
