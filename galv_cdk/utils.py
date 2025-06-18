@@ -95,7 +95,7 @@ def create_waf_scope_web_acl(scope, id, *, name: str, scope_type: str, log_bucke
                     rule_action_overrides=[
                         wafv2.CfnWebACL.RuleActionOverrideProperty(
                             name="SizeRestrictions_BODY",
-                            action=wafv2.CfnWebACL.RuleActionProperty(count={}),
+                            action_to_use=wafv2.CfnWebACL.RuleActionProperty(count={}),
                         )
                     ],
                 ),
