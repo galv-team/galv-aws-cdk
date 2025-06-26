@@ -1,9 +1,6 @@
 # Horrible Hack to support NVM
-from aws_cdk.aws_s3 import Bucket
-
 import _nvm_hack
 from nag_suppressions import suppress_nags_post_synth
-from log_bucket_stack import LogBucketStack
 
 _nvm_hack.hack_nvm_path()
 # /HH
@@ -14,6 +11,7 @@ from aws_cdk.assertions import Template, Match
 from constructs import IConstruct
 from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
 
+from log_bucket_stack import LogBucketStack
 from galv_cdk.backend_stack import GalvBackend
 
 

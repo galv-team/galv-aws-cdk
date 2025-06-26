@@ -1,5 +1,3 @@
-from typing import Union
-
 from aws_cdk import Stack
 from aws_cdk.aws_elasticloadbalancingv2 import CfnListener
 from cdk_nag import NagSuppressions
@@ -72,7 +70,7 @@ def _suppress_taskrole_policy(stack: Stack, name: str):
         execution_role = service.task_definition.execution_role
         policies = [
             execution_role.node.find_child("DefaultPolicy"),
-            task_role.node.find_child("DefaultPolicy"),
+            task_role,
         ]
 
     if len(policies) < 1:

@@ -1,9 +1,8 @@
 # Horrible Hack to support NVM
-from aws_cdk.aws_s3 import Bucket
-from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
-from constructs import IConstruct
 
 import _nvm_hack
+from cdk_nag import AwsSolutionsChecks, HIPAASecurityChecks
+from constructs import IConstruct
 from frontend_stack import GalvFrontend
 from nag_suppressions import suppress_nags_post_synth
 from log_bucket_stack import LogBucketStack
