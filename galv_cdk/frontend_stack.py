@@ -181,20 +181,6 @@ class GalvFrontend(Stack):
             description="Allow HTTP traffic from ALB",
         )
 
-        vpc.add_interface_endpoint(
-            "EcrApiEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.ECR,
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            security_groups=[ecs_sg],
-        )
-
-        vpc.add_interface_endpoint(
-            "EcrDockerEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            security_groups=[ecs_sg],
-        )
-
         enable_insights = self.node.try_get_context("enableContainerInsights")
         if enable_insights is None:
             enable_insights = self.is_production

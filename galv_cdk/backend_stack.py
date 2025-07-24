@@ -206,48 +206,6 @@ class GalvBackend(Stack):
         for subnet in self.vpc.private_subnets:
             Tags.of(subnet).add("AZ", subnet.availability_zone)
 
-        # Add interface endpoints for private access to AWS services
-        self.vpc_endpoint_sg = aws_ec2.SecurityGroup(self, f"{self.name}-EndpointSG", vpc=self.vpc)
-        self.vpc_endpoint_sg.add_ingress_rule(aws_ec2.Peer.ipv4(self.vpc.vpc_cidr_block), aws_ec2.Port.tcp(443), "HTTPS from VPC")
-
-        self.vpc.add_interface_endpoint(
-            "SecretsManagerEndpoint",
-            service=aws_ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-            security_groups=[self.vpc_endpoint_sg],
-            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS)
-        )
-
-        self.vpc.add_interface_endpoint(
-            "CloudWatchLogsEndpoint",
-            service=aws_ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-            security_groups=[self.vpc_endpoint_sg],
-            private_dns_enabled=True,
-            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS)
-        )
-
-        self.vpc.add_interface_endpoint(
-            "EcrApiEndpoint",
-            service=aws_ec2.InterfaceVpcEndpointAwsService.ECR,
-            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            security_groups=[self.vpc_endpoint_sg],
-        )
-
-        self.vpc.add_interface_endpoint(
-            "EcrDockerEndpoint",
-            service=aws_ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            security_groups=[self.vpc_endpoint_sg],
-        )
-
-        # Allow services to access STS for IAM role assumption
-        self.vpc.add_interface_endpoint(
-            "StsEndpoint",
-            service=aws_ec2.InterfaceVpcEndpointAwsService.STS,
-            private_dns_enabled=True,
-            subnets=aws_ec2.SubnetSelection(subnet_type=aws_ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            security_groups=[self.vpc_endpoint_sg]
-        )
-
         self.vpc.add_gateway_endpoint(
             "S3Endpoint",
             service=aws_ec2.GatewayVpcEndpointAwsService.S3,
@@ -273,22 +231,6 @@ class GalvBackend(Stack):
         self.db_sg.add_ingress_rule(self.backend_sg, aws_ec2.Port.tcp(5432), "Postgres from backend service")
         self.db_sg.add_ingress_rule(self.setup_sg, aws_ec2.Port.tcp(5432), "Postgres from setup task")
         self.db_sg.add_ingress_rule(self.monitor_sg, aws_ec2.Port.tcp(5432), "Postgres from monitor task")
-
-        self.vpc_endpoint_sg.add_ingress_rule(
-            aws_ec2.Peer.security_group_id(self.backend_sg.security_group_id),
-            aws_ec2.Port.tcp(443),
-            "Allow HTTPS from backend service to ECR endpoints"
-        )
-        self.vpc_endpoint_sg.add_ingress_rule(
-            aws_ec2.Peer.security_group_id(self.monitor_sg.security_group_id),
-            aws_ec2.Port.tcp(443),
-            "Allow HTTPS from monitor task to ECR endpoints"
-        )
-        self.vpc_endpoint_sg.add_ingress_rule(
-            aws_ec2.Peer.security_group_id(self.setup_sg.security_group_id),
-            aws_ec2.Port.tcp(443),
-            "Allow HTTPS from setup task to VPC endpoints"
-        )
 
     def _create_storage(self):
         """
