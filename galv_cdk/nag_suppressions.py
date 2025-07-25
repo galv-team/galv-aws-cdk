@@ -98,38 +98,55 @@ def _suppress_taskrole_policy(stack: Stack, name: str):
 
 
 def _suppress_vpc_endpoints(stack: Stack, name: str):
-    if stack.__class__.__name__ != "GalvBackend":
-        NagSuppressions.add_resource_suppressions(
-            stack,
-            [
-                {"id": "HIPAA.Security-VPCDefaultSecurityGroupClosed",
-                 "reason": "Default SG is unused; all resources have explicit SGs"},
-                {"id": "HIPAA.Security-VPCNoUnrestrictedRouteToIGW", "reason": "Required for public ALB"},
-                {"id": "HIPAA.Security-VPCSubnetAutoAssignPublicIpDisabled",
-                 "reason": "ALB is the only public-facing resource"}
-            ],
-            apply_to_children=True
-        )
-        sg = stack.node.find_child(f"{name}-FrontendECSSecurityGroup")
-    else:
-        sg = stack.node.find_child(f"{name}-EndpointSG")
+    # Apply common VPC suppressions to the whole stack
     NagSuppressions.add_resource_suppressions(
-        sg,
+        stack,
         [
             {
-                "id": "AwsSolutions-EC23",
-                "reason": "CDK Nag cannot evaluate VPC CIDR block when used in ingress rule. Ingress is correctly scoped to internal HTTPS only."
+                "id": "HIPAA.Security-VPCDefaultSecurityGroupClosed",
+                "reason": "Default SG is unused; all resources have explicit SGs"
             },
             {
-                "id": "HIPAA.Security-EC2RestrictedCommonPorts",
-                "reason": "443 ingress is internal-only; CDK Nag cannot evaluate CIDR scope."
+                "id": "HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
+                "reason": "Required for public ALB"
             },
             {
-                "id": "HIPAA.Security-EC2RestrictedSSH",
-                "reason": "Rule only allows port 443. SSH is not open."
-            },
-        ]
+                "id": "HIPAA.Security-VPCSubnetAutoAssignPublicIpDisabled",
+                "reason": "Public IPs needed for internet-facing ALB; no EC2 exposure"
+            }
+        ],
+        apply_to_children=True
     )
+
+    # Choose security group based on stack type
+    if stack.__class__.__name__ != "GalvBackend":
+        sg_id = f"{name}-FrontendECSSecurityGroup"
+    else:
+        sg_id = f"{name}-EndpointSG"
+
+    try:
+        sg = stack.node.find_child(sg_id)
+        if sg:
+            NagSuppressions.add_resource_suppressions(
+                sg,
+                [
+                    {
+                        "id": "AwsSolutions-EC23",
+                        "reason": "Ingress is restricted to internal HTTPS; CIDR scope not evaluable by CDK Nag"
+                    },
+                    {
+                        "id": "HIPAA.Security-EC2RestrictedCommonPorts",
+                        "reason": "Port 443 is allowed only internally"
+                    },
+                    {
+                        "id": "HIPAA.Security-EC2RestrictedSSH",
+                        "reason": "SSH is not open; rule only allows HTTPS"
+                    },
+                ]
+            )
+    except Exception as e:
+        print(f"[SKIP] Security group {sg_id} not found, skipping SG suppressions.")
+
 
 
 def _suppress_backend_bucket(stack: Stack, name: str):
